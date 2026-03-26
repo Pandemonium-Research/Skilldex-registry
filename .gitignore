@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.local
+coverage/
+*.tsbuildinfo
+.vercel
+SKILLDEX_REGISTRY_SPEC.md
+SKILLDEX_STATUS.md
+SKILLDEX_WEB_PLAN.md
