@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { requireAuth } from "../middleware/auth.js";
 import { createSkillSchema, skillRowToApi } from "../types/skill.js";
 import { createSkill, getSkillByName, updateSkill, deleteSkill } from "../db/skills.js";
-import { fetchSkillFromGitHub } from "../github/fetch.js";
+import { fetchSkillFromGitHub, findRelocatedSkill } from "../github/fetch.js";
 import { validateSkill } from "../validator/index.js";
 
 export const publishRoutes = new Hono();
@@ -89,18 +89,26 @@ publishRoutes.patch("/:name", requireAuth, async (c) => {
     );
   }
 
-  // Re-fetch and re-validate
+  // Re-fetch and re-validate. If source_url 404s (e.g. the repo reorganized
+  // its directories since we last fetched), fall back to scanning the repo
+  // for a SKILL.md whose frontmatter name still matches.
   let metadata;
+  let resolvedSourceUrl = existing.source_url;
   try {
     metadata = await fetchSkillFromGitHub(existing.source_url);
   } catch (err: any) {
-    return c.json(
-      {
-        error: `Could not fetch or parse SKILL.md: ${err.message}`,
-        code: "UNPROCESSABLE",
-      },
-      422
-    );
+    const relocated = await findRelocatedSkill(existing.source_url, name);
+    if (!relocated) {
+      return c.json(
+        {
+          error: `Could not fetch or parse SKILL.md: ${err.message}`,
+          code: "UNPROCESSABLE",
+        },
+        422
+      );
+    }
+    metadata = relocated.metadata;
+    resolvedSourceUrl = relocated.sourceUrl;
   }
 
   const validation = validateSkill({
@@ -109,6 +117,7 @@ publishRoutes.patch("/:name", requireAuth, async (c) => {
   });
 
   const updated = await updateSkill(name, {
+    source_url: resolvedSourceUrl,
     description: metadata.description,
     score: validation.score,
     spec_version: metadata.spec_version,
