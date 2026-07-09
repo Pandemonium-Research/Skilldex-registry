@@ -101,6 +101,65 @@ describe("validateSkill", () => {
     expect(misplaced.every((d) => d.level === "warning")).toBe(true);
   });
 
+  it("deducts points for a non-kebab-case name", () => {
+    const skillMd = readFixture("valid-skill.md").replace(
+      "name: forensics-agent",
+      "name: ForensicsAgent"
+    );
+    const result = validateSkill({ skillMd, files: [] });
+
+    expect(result.score).toBeLessThan(100);
+    const nameDiag = result.diagnostics.find((d) =>
+      d.message.includes("kebab-case")
+    );
+    expect(nameDiag).toBeDefined();
+    expect(nameDiag!.level).toBe("error");
+  });
+
+  it("deducts points for a reserved word in the name", () => {
+    const skillMd = readFixture("valid-skill.md").replace(
+      "name: forensics-agent",
+      "name: claude-forensics"
+    );
+    const result = validateSkill({ skillMd, files: [] });
+
+    expect(result.score).toBeLessThan(100);
+    const nameDiag = result.diagnostics.find((d) =>
+      d.message.includes("reserved word")
+    );
+    expect(nameDiag).toBeDefined();
+    expect(nameDiag!.level).toBe("error");
+  });
+
+  it("deducts points for a description with XML angle brackets", () => {
+    const skillMd = readFixture("valid-skill.md").replace(
+      "description: A comprehensive skill for digital forensics",
+      "description: A <comprehensive> skill for digital forensics"
+    );
+    const result = validateSkill({ skillMd, files: [] });
+
+    expect(result.score).toBeLessThan(100);
+    const descDiag = result.diagnostics.find((d) =>
+      d.message.includes("angle brackets")
+    );
+    expect(descDiag).toBeDefined();
+    expect(descDiag!.level).toBe("error");
+  });
+
+  it("warns about a README.md inside the skill folder", () => {
+    const result = validateSkill({
+      skillMd: readFixture("valid-skill.md"),
+      files: ["README.md", "scripts/analyze.sh"],
+    });
+
+    expect(result.score).toBeLessThan(100);
+    const readmeDiag = result.diagnostics.find((d) =>
+      d.message.includes("README.md")
+    );
+    expect(readmeDiag).toBeDefined();
+    expect(readmeDiag!.level).toBe("warning");
+  });
+
   it("caps score at 0 minimum", () => {
     // Skill with many issues
     const skillMd = `---
