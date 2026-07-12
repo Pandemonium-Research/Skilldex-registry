@@ -19,10 +19,18 @@
  * Dry runs and real runs checkpoint separately. A full, uninterrupted run
  * clears its checkpoint at the end.
  *
+ * To split the work across multiple terminals, give each one a disjoint
+ * --from/--to name range (each range gets its own checkpoint file, so they
+ * don't interfere). Note this only helps throughput if each terminal uses a
+ * different GITHUB_TOKEN — terminals sharing one token share one 5000/hr
+ * quota, so running ranges in parallel spends that quota faster rather than
+ * raising it.
+ *
  * Usage:
- *   npm run rescore                  — local (loads .env), resumes automatically
- *   npm run rescore -- --dry-run     — print the changes without writing them
- *   npm run rescore -- --restart     — ignore any checkpoint and start from the top
+ *   npm run rescore                          — local (loads .env), resumes automatically
+ *   npm run rescore -- --dry-run             — print the changes without writing them
+ *   npm run rescore -- --restart             — ignore any checkpoint and start from the top
+ *   npm run rescore -- --from=m --to=z       — only process skills with m <= name < z
  *
  * Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
  * Optional:          GITHUB_TOKEN (raises GitHub API rate limit to 5000/hr)
@@ -43,8 +51,21 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
   process.exit(1);
 }
 
+function getArg(flag: string): string | undefined {
+  const prefix = `${flag}=`;
+  const found = process.argv.find((a) => a.startsWith(prefix));
+  return found ? found.slice(prefix.length) : undefined;
+}
+
 const DRY_RUN = process.argv.includes("--dry-run");
 const RESTART = process.argv.includes("--restart");
+const RANGE_FROM = getArg("--from"); // inclusive
+const RANGE_TO = getArg("--to"); // exclusive
+
+if (RANGE_FROM && RANGE_TO && RANGE_FROM >= RANGE_TO) {
+  console.error(`--from (${RANGE_FROM}) must sort before --to (${RANGE_TO})`);
+  process.exit(1);
+}
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -53,12 +74,21 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const DELAY_MS = 300;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Dry runs and real runs track progress separately so a preview run never
-// causes a later real run to skip skills it hasn't actually written yet.
+// Dry runs, real runs, and each --from/--to range track progress separately,
+// so parallel terminals (and a preview run) never clobber each other's
+// checkpoint or cause a real run to skip skills it hasn't actually written.
+function sanitizeForFilename(s: string): string {
+  return s.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const rangeSuffix =
+  RANGE_FROM || RANGE_TO
+    ? `.${sanitizeForFilename(RANGE_FROM ?? "start")}-${sanitizeForFilename(RANGE_TO ?? "end")}`
+    : "";
 const CHECKPOINT_PATH = path.join(
   __dirname,
-  DRY_RUN ? ".rescore-checkpoint.dryrun.json" : ".rescore-checkpoint.json"
+  `.rescore-checkpoint${DRY_RUN ? ".dryrun" : ""}${rangeSuffix}.json`
 );
 
 async function loadCheckpoint(): Promise<string | null> {
@@ -84,18 +114,50 @@ async function clearCheckpoint(): Promise<void> {
   }
 }
 
-async function rescore() {
-  console.log(`Skilldex Registry — rescore all skills${DRY_RUN ? " (dry run)" : ""}\n`);
+interface SkillRow {
+  name: string;
+  source_url: string;
+  score: number | null;
+}
 
-  const { data: skills, error } = await supabase
-    .from("skills")
-    .select("name, source_url, score")
-    .order("name");
+// PostgREST caps rows-per-request (commonly 1000) regardless of how many
+// actually match, so a plain .select() silently truncates on a table this
+// size. Page through with .range() until a page comes back short.
+async function loadAllSkills(): Promise<SkillRow[]> {
+  const PAGE_SIZE = 1000;
+  const skills: SkillRow[] = [];
+  let from = 0;
 
-  if (error || !skills) {
-    console.error("Failed to load skills:", error?.message);
-    return;
+  while (true) {
+    const { data, error } = await supabase
+      .from("skills")
+      .select("name, source_url, score")
+      .order("name")
+      .range(from, from + PAGE_SIZE - 1);
+
+    if (error) {
+      throw new Error(`Failed to load skills: ${error.message}`);
+    }
+    if (!data || data.length === 0) break;
+
+    skills.push(...(data as SkillRow[]));
+    if (data.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
   }
+
+  return skills;
+}
+
+async function rescore() {
+  const rangeLabel = RANGE_FROM || RANGE_TO ? ` [${RANGE_FROM ?? "start"}, ${RANGE_TO ?? "end"})` : "";
+  console.log(`Skilldex Registry — rescore all skills${DRY_RUN ? " (dry run)" : ""}${rangeLabel}\n`);
+
+  const allSkills = await loadAllSkills();
+  const skills = allSkills.filter((s) => {
+    if (RANGE_FROM && s.name < RANGE_FROM) return false;
+    if (RANGE_TO && s.name >= RANGE_TO) return false;
+    return true;
+  });
 
   const checkpoint = await loadCheckpoint();
   const toProcess = checkpoint ? skills.filter((s) => s.name > checkpoint) : skills;
@@ -105,7 +167,9 @@ async function rescore() {
       `Resuming after "${checkpoint}" — ${skills.length - toProcess.length} already done this run, ${toProcess.length} remaining\n`
     );
   } else {
-    console.log(`Loaded ${skills.length} skills\n`);
+    console.log(
+      `Loaded ${allSkills.length} skills${rangeLabel ? `, ${skills.length} in range` : ""}\n`
+    );
   }
 
   let changed = 0;
