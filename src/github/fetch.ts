@@ -157,17 +157,59 @@ const FETCH_TIMEOUT_MS = 15_000;
 // time on repos with many skill folders instead of scaling with candidate count.
 const RELOCATION_SEARCH_BUDGET_MS = 30_000;
 
+// A rate-limited response looks just like a 404 unless we check for it
+// explicitly — without this, a caller near quota exhaustion would treat every
+// remaining request as "not found" and, worse, kick off the (also rate
+// limited) relocation search for each one instead of just waiting it out.
+const MAX_RATE_LIMIT_RETRIES = 2;
+const DEFAULT_RATE_LIMIT_WAIT_MS = 60_000;
+const MAX_RATE_LIMIT_WAIT_MS = 65 * 60_000; // primary limit resets hourly; never wait longer than that
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function isRateLimitResponse(response: Response): boolean {
+  if (response.status !== 403 && response.status !== 429) return false;
+  return response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after");
+}
+
+function rateLimitWaitMs(response: Response): number {
+  const retryAfter = Number(response.headers.get("retry-after"));
+  if (Number.isFinite(retryAfter) && retryAfter > 0) {
+    return Math.min(retryAfter * 1000 + 1000, MAX_RATE_LIMIT_WAIT_MS);
+  }
+
+  const resetAt = Number(response.headers.get("x-ratelimit-reset"));
+  if (Number.isFinite(resetAt) && resetAt > 0) {
+    const waitMs = resetAt * 1000 - Date.now() + 1000; // +1s buffer past reset
+    if (waitMs > 0) return Math.min(waitMs, MAX_RATE_LIMIT_WAIT_MS);
+  }
+
+  return DEFAULT_RATE_LIMIT_WAIT_MS;
+}
+
 async function fetchWithTimeout(
   url: string,
-  headers: Record<string, string>
+  headers: Record<string, string>,
+  attempt = 0
 ): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let response: Response;
   try {
-    return await fetch(url, { headers, signal: controller.signal });
+    response = await fetch(url, { headers, signal: controller.signal });
   } finally {
     clearTimeout(timeout);
   }
+
+  if (isRateLimitResponse(response) && attempt < MAX_RATE_LIMIT_RETRIES) {
+    const waitMs = rateLimitWaitMs(response);
+    console.warn(
+      `  ⏸ GitHub API rate limit hit — waiting ${Math.ceil(waitMs / 1000)}s for it to reset...`
+    );
+    await sleep(waitMs);
+    return fetchWithTimeout(url, headers, attempt + 1);
+  }
+
+  return response;
 }
 
 function parseGitHubUrl(url: string): {
