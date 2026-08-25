@@ -35,11 +35,46 @@ describe("Skills route input validation", () => {
     });
     expect(invalidTier.success).toBe(false);
 
-    // Limit out of range
+    // Limit out of range. 100 is the inclusive maximum, so 101 is the first invalid
+    // value — this previously asserted on "100" and failed.
+    const atMax = searchSkillsSchema.safeParse({ limit: "100" });
+    expect(atMax.success).toBe(true);
+
     const bigLimit = searchSkillsSchema.safeParse({
-      limit: "100",
+      limit: "101",
     });
     expect(bigLimit.success).toBe(false);
+  });
+
+  it("slugifies imported skill names", async () => {
+    const { slugifySkillName, createSkillSchema } = await import(
+      "../../src/types/skill.js"
+    );
+    const key = "abcdef0123456789";
+
+    expect(slugifySkillName("Code Review", key)).toBe("code-review");
+    expect(slugifySkillName("video_frames", key)).toBe("video-frames");
+    expect(slugifySkillName("  Trailing--Dashes  ", key)).toBe("trailing-dashes");
+
+    // Names with no ASCII alphanumerics fall back to the content key rather than
+    // producing an empty slug.
+    expect(slugifySkillName("GIF搜索器", key)).toBe("gif");
+    expect(slugifySkillName("搜索器", key)).toBe("skill-abcdef01");
+    expect(slugifySkillName(null, key)).toBe("skill-abcdef01");
+
+    // A caller passing a non-hex key must still get a legal name out.
+    expect(slugifySkillName("搜索器", "https://github.com/o/r")).toBe("skill-httpsgit");
+    expect(slugifySkillName("搜索器", "///")).toBe("skill");
+
+    // Whatever comes out must satisfy the publish-time name rule.
+    for (const raw of ["Code Review", "video_frames", "搜索器", null, "a"]) {
+      const slug = slugifySkillName(raw, key);
+      const ok = createSkillSchema.safeParse({
+        name: slug,
+        source_url: "https://github.com/o/r",
+      });
+      expect(ok.success, `slug ${JSON.stringify(slug)} failed name validation`).toBe(true);
+    }
   });
 
   it("validates create skill schema", async () => {

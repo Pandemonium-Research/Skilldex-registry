@@ -22,10 +22,16 @@ const v1 = new Hono();
 v1.route("/health", healthRoutes);
 
 v1.use("/skills", rateLimit({ max: 100, windowMs: 60_000 }));
+// Both shapes: /skills/:name/install (legacy) and /skills/:owner/:name/install.
 v1.use("/skills/*/install", rateLimit({ max: 500, windowMs: 60_000 }));
+v1.use("/skills/*/*/install", rateLimit({ max: 500, windowMs: 60_000 }));
 
-v1.route("/skills", skillsRoutes);
+// installRoutes MUST be mounted before skillsRoutes. The legacy install path
+// /skills/:name/install has the same segment count as /skills/:owner/:name, so if
+// skills matched first, `GET /skills/foo/install` would resolve as owner=foo,
+// name=install and the legacy install route would be unreachable.
 v1.route("/skills", installRoutes);
+v1.route("/skills", skillsRoutes);
 v1.route("/skills", publishRoutes);
 v1.route("/auth", authRoutes);
 v1.route("/spec-versions", specRoutes);

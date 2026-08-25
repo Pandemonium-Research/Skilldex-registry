@@ -61,12 +61,13 @@ export async function searchSkills(
   };
 }
 
-export async function getSkillByName(name: string): Promise<SkillRow | null> {
+export async function getSkill(owner: string, name: string): Promise<SkillRow | null> {
   const supabase = getSupabase();
 
   const { data, error } = await supabase
     .from("skills")
     .select("*")
+    .eq("owner", owner)
     .eq("name", name)
     .single();
 
@@ -78,16 +79,47 @@ export async function getSkillByName(name: string): Promise<SkillRow | null> {
   return data as SkillRow;
 }
 
-export async function incrementInstallCount(name: string): Promise<SkillRow | null> {
+/**
+ * Resolve a bare, unqualified name for CLI builds that predate the owner namespace.
+ *
+ * Names are only unique within an owner now, so this reports ambiguity rather than
+ * picking a winner — silently resolving to whichever row came back first is how you
+ * ship a skill nobody asked for.
+ */
+export async function getSkillByBareName(
+  name: string
+): Promise<{ skill: SkillRow | null; ambiguous: boolean; owners: string[] }> {
   const supabase = getSupabase();
 
-  // Use RPC or manual increment
-  const skill = await getSkillByName(name);
+  const { data, error } = await supabase
+    .from("skills")
+    .select("*")
+    .eq("name", name)
+    .limit(11);
+
+  if (error) {
+    throw new Error(`Database query failed: ${error.message}`);
+  }
+
+  const rows = (data ?? []) as SkillRow[];
+  if (rows.length === 0) return { skill: null, ambiguous: false, owners: [] };
+  if (rows.length === 1) return { skill: rows[0], ambiguous: false, owners: [rows[0].owner] };
+  return { skill: null, ambiguous: true, owners: rows.slice(0, 10).map((r) => r.owner) };
+}
+
+export async function incrementInstallCount(
+  owner: string,
+  name: string
+): Promise<SkillRow | null> {
+  const supabase = getSupabase();
+
+  const skill = await getSkill(owner, name);
   if (!skill) return null;
 
   const { data, error } = await supabase
     .from("skills")
     .update({ install_count: skill.install_count + 1 })
+    .eq("owner", owner)
     .eq("name", name)
     .select("*")
     .single();
@@ -121,6 +153,7 @@ export async function createSkill(
 }
 
 export async function updateSkill(
+  owner: string,
   name: string,
   updates: Partial<Pick<SkillRow, "description" | "score" | "spec_version" | "tags" | "source_url">>
 ): Promise<SkillRow | null> {
@@ -129,6 +162,7 @@ export async function updateSkill(
   const { data, error } = await supabase
     .from("skills")
     .update({ ...updates, updated_at: new Date().toISOString() })
+    .eq("owner", owner)
     .eq("name", name)
     .select("*")
     .single();
@@ -141,12 +175,13 @@ export async function updateSkill(
   return data as SkillRow;
 }
 
-export async function deleteSkill(name: string): Promise<boolean> {
+export async function deleteSkill(owner: string, name: string): Promise<boolean> {
   const supabase = getSupabase();
 
   const { error, count } = await supabase
     .from("skills")
     .delete({ count: "exact" })
+    .eq("owner", owner)
     .eq("name", name);
 
   if (error) {

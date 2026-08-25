@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { requireAuth } from "../middleware/auth.js";
 import { createSkillSchema, skillRowToApi } from "../types/skill.js";
-import { createSkill, getSkillByName, updateSkill, deleteSkill } from "../db/skills.js";
+import { createSkill, getSkill, updateSkill, deleteSkill } from "../db/skills.js";
 import { fetchSkillFromGitHub, findRelocatedSkill } from "../github/fetch.js";
 import { validateSkill } from "../validator/index.js";
 
@@ -19,11 +19,20 @@ publishRoutes.post("/", requireAuth, async (c) => {
     );
   }
 
-  // Check if name is taken
-  const existing = await getSkillByName(parsed.data.name);
+  const publisher = c.get("publisher");
+
+  // The publisher owns their namespace. Taking `owner` from the authenticated handle
+  // rather than the request body is what stops anyone publishing into someone else's.
+  const owner = publisher.github_handle;
+
+  // Names are unique per owner, so a clash only matters within this namespace.
+  const existing = await getSkill(owner, parsed.data.name);
   if (existing) {
     return c.json(
-      { error: "Skill name already exists", code: "CONFLICT" },
+      {
+        error: `You already have a skill named "${parsed.data.name}"`,
+        code: "CONFLICT",
+      },
       409
     );
   }
@@ -48,11 +57,11 @@ publishRoutes.post("/", requireAuth, async (c) => {
     files: metadata.files,
   });
 
-  const publisher = c.get("publisher");
-
   // Store in database
   const skill = await createSkill({
     name: parsed.data.name,
+    display_name: metadata.name ?? parsed.data.name,
+    owner,
     description: metadata.description,
     author: metadata.author ?? publisher.github_handle,
     source_url: parsed.data.source_url,
@@ -61,6 +70,8 @@ publishRoutes.post("/", requireAuth, async (c) => {
     spec_version: metadata.spec_version,
     tags: parsed.data.tags ?? null,
     published_by: publisher.id,
+    // Only imported rows carry a content_key; this skill's bytes were never hashed.
+    content_key: null,
   });
 
   return c.json(
@@ -72,12 +83,13 @@ publishRoutes.post("/", requireAuth, async (c) => {
   );
 });
 
-// PATCH /skills/:name — update an existing skill (re-fetch and re-score)
-publishRoutes.patch("/:name", requireAuth, async (c) => {
+// PATCH /skills/:owner/:name — update an existing skill (re-fetch and re-score)
+publishRoutes.patch("/:owner/:name", requireAuth, async (c) => {
+  const owner = c.req.param("owner");
   const name = c.req.param("name");
   const publisher = c.get("publisher");
 
-  const existing = await getSkillByName(name);
+  const existing = await getSkill(owner, name);
   if (!existing) {
     return c.json({ error: "Skill not found", code: "NOT_FOUND" }, 404);
   }
@@ -116,7 +128,7 @@ publishRoutes.patch("/:name", requireAuth, async (c) => {
     files: metadata.files,
   });
 
-  const updated = await updateSkill(name, {
+  const updated = await updateSkill(owner, name, {
     source_url: resolvedSourceUrl,
     description: metadata.description,
     score: validation.score,
@@ -129,12 +141,13 @@ publishRoutes.patch("/:name", requireAuth, async (c) => {
   });
 });
 
-// DELETE /skills/:name — remove a skill from the registry
-publishRoutes.delete("/:name", requireAuth, async (c) => {
+// DELETE /skills/:owner/:name — remove a skill from the registry
+publishRoutes.delete("/:owner/:name", requireAuth, async (c) => {
+  const owner = c.req.param("owner");
   const name = c.req.param("name");
   const publisher = c.get("publisher");
 
-  const existing = await getSkillByName(name);
+  const existing = await getSkill(owner, name);
   if (!existing) {
     return c.json({ error: "Skill not found", code: "NOT_FOUND" }, 404);
   }
@@ -146,7 +159,7 @@ publishRoutes.delete("/:name", requireAuth, async (c) => {
     );
   }
 
-  await deleteSkill(name);
+  await deleteSkill(owner, name);
 
   return c.json({ success: true });
 });
