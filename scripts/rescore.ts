@@ -131,7 +131,8 @@ async function loadAllSkills(): Promise<SkillRow[]> {
   while (true) {
     const { data, error } = await supabase
       .from("skills")
-      .select("name, source_url, score")
+      .select("owner, name, source_url, score")
+      .order("owner")
       .order("name")
       .range(from, from + PAGE_SIZE - 1);
 
@@ -236,6 +237,9 @@ async function rescore() {
             spec_version: metadata.spec_version,
             updated_at: new Date().toISOString(),
           })
+          // Scope by owner too: names are only unique within an owner, so filtering
+          // on name alone would rewrite every same-named skill in the registry.
+          .eq("owner", skill.owner)
           .eq("name", skill.name);
 
         if (updateError) {

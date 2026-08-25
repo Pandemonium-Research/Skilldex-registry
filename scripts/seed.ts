@@ -13,9 +13,11 @@
  * Optional:          GITHUB_TOKEN (raises GitHub API rate limit to 5000/hr)
  */
 
+import { createHash } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import { fetchSkillFromGitHub } from "../src/github/fetch.js";
 import { validateSkill } from "../src/validator/index.js";
+import { slugifySkillName } from "../src/types/skill.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -169,12 +171,23 @@ async function seed() {
           files: metadata.files,
         });
 
+        // Names are unique per owner, not globally, so the same skill name published
+        // by two different repo owners no longer collides.
+        // The fallback key must be hex, not the URL itself — slugifySkillName takes its
+        // first 8 characters verbatim, and "https://" is not a legal name.
+        const slug = slugifySkillName(
+          metadata.name,
+          createHash("sha256").update(sourceUrl).digest("hex")
+        );
+
         const { data: inserted, error } = await supabase
           .from("skills")
           .upsert(
             [
               {
-                name: metadata.name,
+                name: slug,
+                display_name: metadata.name,
+                owner,
                 description: metadata.description || metadata.name,
                 author: owner,
                 source_url: sourceUrl,
@@ -185,7 +198,7 @@ async function seed() {
                 published_by: publisher.id,
               },
             ],
-            { onConflict: "name", ignoreDuplicates: true }
+            { onConflict: "owner,name", ignoreDuplicates: true }
           )
           .select("name");
 
