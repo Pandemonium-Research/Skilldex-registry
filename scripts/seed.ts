@@ -74,6 +74,34 @@ async function discoverSkillPaths(
     });
 }
 
+/** Page through one column, defeating PostgREST's max-rows cap.
+ *  A short page means the end of the table; a full page always implies another request. */
+async function fetchAllColumn(table: string, column: string): Promise<string[]> {
+  const PAGE = 1000;
+  const values: string[] = [];
+
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from(table)
+      .select(column)
+      .range(from, from + PAGE - 1);
+
+    if (error) {
+      // Preloading is an optimisation, not a correctness requirement: failing here costs
+      // GitHub quota, it does not corrupt the run. Say so loudly and carry on.
+      console.error(`Failed to preload ${table}.${column}: ${error.message}`);
+      break;
+    }
+    if (!data || data.length === 0) break;
+
+    // Dynamic table/column names defeat the client's row typing; the shape is known here.
+    values.push(...data.map((row) => (row as unknown as Record<string, string>)[column]));
+    if (data.length < PAGE) break;
+  }
+
+  return values;
+}
+
 async function seed() {
   console.log("Skilldex Registry — skill sync\n");
 
@@ -117,15 +145,18 @@ async function seed() {
   // 4. Pre-load all existing source_urls to avoid redundant GitHub API calls.
   //    Includes skills already inserted AND urls previously seen but skipped
   //    due to name conflicts — prevents re-fetching them every run.
-  const [{ data: existingSkills }, { data: seenUrls }] = await Promise.all([
-    supabase.from("skills").select("source_url"),
-    supabase.from("seen_source_urls").select("url"),
+  //
+  //    This MUST paginate. An unranged select is capped by PostgREST's max-rows, which
+  //    silently truncates the set: everything above the cap looks new, is re-fetched from
+  //    GitHub on every run, and inflates every "N new" figure the run reports. Writes stay
+  //    no-ops under ignoreDuplicates, so the only symptoms are wasted API quota and
+  //    misleading counts — which is why it went unnoticed.
+  const [existingSourceUrls, seenSourceUrls] = await Promise.all([
+    fetchAllColumn("skills", "source_url"),
+    fetchAllColumn("seen_source_urls", "url"),
   ]);
 
-  const existingUrls = new Set([
-    ...(existingSkills ?? []).map((s: { source_url: string }) => s.source_url),
-    ...(seenUrls ?? []).map((s: { url: string }) => s.url),
-  ]);
+  const existingUrls = new Set([...existingSourceUrls, ...seenSourceUrls]);
   console.log(`${existingUrls.size} skills already in registry\n`);
 
   // 5. Process each repo
