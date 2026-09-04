@@ -16,6 +16,9 @@ export type SkillsListResponse = PaginatedResponse<Skill>;
 
 export interface InstallResponse {
   name: string;
+  owner: string;
+  /** "owner/name" — safe to echo back even when the caller used a bare name. */
+  qualified_name: string;
   source_url: string;
   score: number | null;
   spec_version: string;

@@ -4,7 +4,11 @@ import { z } from "zod";
 
 export interface SkillRow {
   id: string;
+  /** URL slug, unique within an owner. Not globally unique. */
   name: string;
+  /** The skill's authored name, before slugification. */
+  display_name: string | null;
+  owner: string;
   description: string;
   author: string | null;
   source_url: string;
@@ -13,6 +17,8 @@ export interface SkillRow {
   spec_version: string;
   tags: string[] | null;
   install_count: number;
+  /** SHA of the SKILL.md bytes for imported skills; null for hand-published ones. */
+  content_key: string | null;
   published_at: string;
   updated_at: string;
   published_by: string | null;
@@ -22,6 +28,10 @@ export interface SkillRow {
 
 export interface Skill {
   name: string;
+  display_name: string | null;
+  owner: string;
+  /** "owner/name" — how the CLI addresses a skill. */
+  qualified_name: string;
   description: string;
   author: string | null;
   source_url: string;
@@ -53,7 +63,13 @@ export const createSkillSchema = z.object({
     .string()
     .min(1)
     .max(100)
-    .regex(/^[a-z0-9][a-z0-9-]*[a-z0-9]$/, "Name must be lowercase alphanumeric with hyphens"),
+    // Mirrors KEBAB_CASE in src/validator/index.ts. The previous pattern
+    // (^[a-z0-9][a-z0-9-]*[a-z0-9]$) required at least two characters, so it rejected
+    // single-character names that the validator itself accepts.
+    .regex(
+      /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
+      "Name must be lowercase alphanumeric with single hyphens between segments"
+    ),
   source_url: z.string().url().startsWith("https://github.com/"),
   tags: z.array(z.string().min(1).max(50)).max(10).optional(),
 });
@@ -62,9 +78,39 @@ export type CreateSkillBody = z.infer<typeof createSkillSchema>;
 
 // --- Helpers ---
 
+/**
+ * Reduce an authored skill name to a URL slug matching createSkillSchema's rule.
+ *
+ * Hand-published skills must already be kebab-case, but 6.7% of imported names are
+ * not — `video_frames`, `Code Review`, and non-Latin names like `GIF搜索器`. The
+ * authored form is kept in display_name; this produces what goes in the URL.
+ *
+ * `fallbackKey` (the content_key) is used when a name slugifies to nothing, which
+ * happens for names with no ASCII alphanumerics at all. It is expected to be hex, but
+ * is sanitized anyway — this function's contract is that its output always passes
+ * createSkillSchema, and that must not depend on the caller passing a clean key.
+ */
+export function slugifySkillName(raw: string | null, fallbackKey: string): string {
+  const slug = (raw ?? "")
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 100)
+    .replace(/-$/, "");
+  if (slug) return slug;
+
+  const key = fallbackKey.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 8);
+  return key ? `skill-${key}` : "skill";
+}
+
 export function skillRowToApi(row: SkillRow): Skill {
   return {
     name: row.name,
+    display_name: row.display_name,
+    owner: row.owner,
+    qualified_name: `${row.owner}/${row.name}`,
     description: row.description,
     author: row.author,
     source_url: row.source_url,
