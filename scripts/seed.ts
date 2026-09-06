@@ -159,6 +159,21 @@ async function seed() {
   const existingUrls = new Set([...existingSourceUrls, ...seenSourceUrls]);
   console.log(`${existingUrls.size} skills already in registry\n`);
 
+  /**
+   * Record a url this run has settled, so no future run fetches it again.
+   *
+   * Only *deterministic* outcomes belong here: a name conflict, or a SKILL.md that will
+   * fail in exactly the same way every time. Transient failures — a timeout, a 5xx, a
+   * rate limit, a database error — must never be recorded, or one bad night would drop a
+   * real skill from the registry permanently.
+   */
+  const markSeen = async (url: string) => {
+    await supabase
+      .from("seen_source_urls")
+      .upsert([{ url }], { onConflict: "url", ignoreDuplicates: true });
+    existingUrls.add(url); // keep the local set in step so this run skips it too
+  };
+
   // 5. Process each repo
   let totalInserted = 0;
   let totalSkipped = 0;
@@ -194,6 +209,7 @@ async function seed() {
         if (!metadata.name) {
           console.log(`  ✗ Skipped (no name): ${sourceUrl}`);
           totalFailed++;
+          await markSeen(sourceUrl); // frontmatter parsed and has no name; it will not grow one
           continue;
         }
 
@@ -239,11 +255,7 @@ async function seed() {
         } else if (!inserted || inserted.length === 0) {
           console.log(`  ~ ${metadata.name} (name conflict, skipped)`);
           totalSkipped++;
-          // Persist so future runs don't re-fetch this url
-          await supabase
-            .from("seen_source_urls")
-            .upsert([{ url: sourceUrl }], { onConflict: "url", ignoreDuplicates: true });
-          existingUrls.add(sourceUrl);
+          await markSeen(sourceUrl);
         } else {
           console.log(`  ✓ ${metadata.name} (score: ${validation.score})`);
           totalInserted++;
@@ -252,6 +264,10 @@ async function seed() {
       } catch (err: any) {
         console.log(`  ✗ ${sourceUrl}: ${err.message}`);
         totalFailed++;
+        // PARSE_FAILED is a property of the file, not of this run: the same SKILL.md
+        // parses the same way tomorrow. Every other error (FETCH_FAILED, aborts, 5xx)
+        // may well succeed next time, so those are deliberately left to be retried.
+        if (err?.code === "PARSE_FAILED") await markSeen(sourceUrl);
       }
     }
 
