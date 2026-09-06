@@ -345,6 +345,67 @@ threatened.
 
 ---
 
+## 2b. The naming pass, verified — and what D13 actually saves
+
+**Two different hashes are at work here, and they do different jobs.**
+
+*GitSkills'* hash (`file_sha`, surfaced as `dedup_primary`) decides **how many skills exist**:
+it collapses 3,797,117 file occurrences into 1,877,981 byte-distinct contents. Our format gates
+then take that to **1,610,957**. That number is a property of the dataset, not of anything we
+built.
+
+*Our* content hash (D13) decides **what each of those is called**. It does not add or remove a
+single row — it stops rows being lost to name collisions.
+
+| Stage | Count |
+|---|---:|
+| File occurrences | 3,797,117 |
+| Byte-distinct (GitSkills `file_sha`) | 1,877,981 |
+| After format gates | **1,610,957** |
+| Distinct `(owner, base_slug)` | 1,487,272 |
+| **Named by D13** | **1,610,957** — all of them |
+| **Lost under `ON CONFLICT DO NOTHING`** | **123,685** |
+
+**123,685 skills — 7.7% of the corpus — would have been silently discarded** by the naming
+behaviour that was in place before D13. Not rejected, not logged: dropped by a conflict clause,
+exactly as migration 005 was written to prevent, at 3× the scale 005 was sized against.
+
+### Verification
+
+`scripts/corpus/naming.sql` and the §2 collision survey are independent queries. All four
+figures agree: 1,610,957 gated rows, 81,238 contested groups, 204,923 rows involved, largest
+group 115.
+
+| Case | Rows |
+|---|---:|
+| uncontested → bare slug | 1,406,034 |
+| canonical → keeps bare slug | 42,794 |
+| duplicate-suffixed | 56,191 |
+| distinct-suffixed | 105,938 |
+
+Invariants over all 1.6M rows: **zero** `(owner, final_slug)` collisions, **zero** slugs over
+100 characters, **zero** slugs failing `createSkillSchema`'s kebab rule.
+
+### The bug the invariants caught
+
+The kebab check failed first time, on 12 rows. **Truncating a slug to 100 characters can
+reintroduce a trailing hyphen** that the earlier strip removed — every one of the 12 was
+exactly 100 characters and ended in `-`. `slugifySkillName` already guards this with
+`.slice(0, 100).replace(/-$/, "")`; the SQL did not, and the same applies to the 91-character
+truncation used before appending a hash suffix.
+
+Fixed *inside* the base slug rather than afterwards. Stripping after grouping would have let
+two previously distinct slugs become equal with the contested check none the wiser — a
+correctness bug hiding behind a cosmetic one.
+
+### Environment trap
+
+macOS writes AppleDouble sidecars (`._part-00000.parquet`) onto exFAT volumes, and DuckDB
+fails on them with *"No magic bytes found at end of file"*. Glob `part-*.parquet`, not
+`*.parquet`.
+
+---
+
 ## 3. Dataset source
 
 | | Zenodo | Hugging Face mirror |

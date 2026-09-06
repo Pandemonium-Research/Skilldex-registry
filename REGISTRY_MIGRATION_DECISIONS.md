@@ -275,8 +275,14 @@ unreliable.
 `<hash8>` is the first 8 hex characters of `content_key`, which is the dataset's `file_sha`.
 
 **Why a hash at all.** 204,923 rows — **12.75% of the corpus** — collide on `(owner, slug)`.
-`ON CONFLICT DO NOTHING` would drop them silently, which is exactly the failure migration 005
-exists to prevent, only larger.
+`ON CONFLICT DO NOTHING` keeps one row per group and drops the rest silently: measured,
+**123,685 skills (7.7% of the corpus) would vanish**. That is exactly the failure migration 005
+exists to prevent, at three times the scale 005 was sized against.
+
+Note the division of labour between the two hashes involved. GitSkills' `file_sha` decides how
+many skills *exist* (3,797,117 occurrences → 1,877,981 byte-distinct → 1,610,957 after the
+format gates). D13's use of that same hash decides what each one is *called*. It adds and
+removes nothing; it only stops rows being lost to naming.
 
 **Why not `owner/repo/name`.** Measured: it resolves **28.1%** and leaves 147,249 rows still
 contested, because **53,305 of the 81,238 contested groups are confined to a single repo**. It
