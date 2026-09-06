@@ -1,0 +1,150 @@
+# Registry Migration — Backlog
+
+Task tracking for the move off Supabase/Postgres to Turso/SQLite and the full GitSkills
+import. Rationale for every design call is in
+[REGISTRY_MIGRATION_DECISIONS.md](REGISTRY_MIGRATION_DECISIONS.md).
+
+Phase 3 deliberately precedes phase 4: it is what makes the import survivable rather than
+something to clean up afterwards.
+
+Effort figures are estimates, not commitments.
+
+---
+
+## Status
+
+| Phase | Work | Effort | Status |
+|---|---|---:|---|
+| **0** | Provision Turso, verify connectivity | 0.5d | ✅ done |
+| **1** | Schema + migrate live rows + parity check | 1d | 🔨 in progress |
+| **2** | Rewrite `src/db/*`; replace Supabase Auth | 2–3d | ⬜ |
+| **3** | Freshness #3 — kill the global preload | 0.5d | ⬜ |
+| **4** | Import the corpus | 2d | ⬜ |
+| **5** | Freshness #1+2 — repo SHA polling, compare diffs | 1.5d | ⬜ |
+| **6** | Freshness #4+5 — verify-on-read, priority queue | 1d | ⬜ |
+| **7** | Opt-out / takedown path | 1d | ⬜ |
+
+---
+
+## Phase 0 — Provisioning ✅
+
+- [x] Turso account on the free `starter` plan — no card
+- [x] Group `default` primary in `aws-us-east-1`, matching Vercel's `iad1`
+- [x] Database `skilldex-registry`, `--size-limit 4gb` as a guard against a runaway import
+- [x] `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` in local `.env` and GitHub Actions secrets
+- [x] Verified: SQLite 3.47.0, `ENABLE_FTS5` present, database empty
+- [ ] Add both vars to `.env.example` (committed file, it is the setup contract)
+
+---
+
+## Phase 1 — Schema and parity 🔨
+
+- [ ] `schema/sqlite/001_schema.sql` — six tables, FTS5 external content, trigram table,
+      triggers, indexes
+- [ ] `scripts/migrate-to-turso.ts` — copy the live rows out of Supabase
+- [ ] Parity check — per-table row counts, plus the same search returning the same top
+      results from both backends
+- [ ] Confirm `json_each` works on this build (JSON functions are default-on since 3.38;
+      Turso is 3.47, so this is a formality — but confirm rather than assume)
+
+**Note.** `watched_repos` seed rows must NOT be re-inserted from `002_watched_repos.sql`.
+That file's `INSERT` is stale: it lists four repos on `main`, but production now has 17 rows,
+`ComposioHQ` is on `master`, and `PhilipStark/book-genesis` has been repointed to
+`felipelobomotta-blip/book-genesis-v4`. Copy the live rows, do not re-seed.
+
+---
+
+## Phase 2 — Data layer and auth
+
+- [ ] `src/db/client.ts` → `@libsql/client/web` (HTTP; no connection pool to exhaust from
+      serverless — an advantage over Postgres in this deployment)
+- [ ] Rewrite `src/db/skills.ts` (7 functions), `skillsets.ts`, `publishers.ts`
+- [ ] `searchSkills`: Postgres `textSearch` → FTS5 `MATCH` with `bm25()` ranking
+- [ ] Default sort → `score` (D10)
+- [ ] Replace the three Supabase Auth calls with direct GitHub OAuth + self-issued JWT
+- [ ] **Fix the publisher identity bug while here** — `upsertPublisher` never sets
+      `publishers.id`, so `getPublisherById(user.id)` can never match. Key on
+      `github_handle`, which is already `UNIQUE`
+- [ ] Check whether a GitHub OAuth app already exists — `GITHUB_CLIENT_ID` /
+      `GITHUB_CLIENT_SECRET` are already in `.env.example`, so this may be half-configured
+- [ ] Switch Vercel env vars at cutover; **leave `SUPABASE_*` in place** so rollback is one
+      variable, not a scramble
+- [ ] Update `.github/workflows/nightly-seed.yml` to pass the Turso vars
+
+---
+
+## Phase 3 — Kill the global preload
+
+- [ ] Replace `fetchAllColumn` in `scripts/seed.ts` with a per-repo anti-join
+
+**Why this is before the import.** Today the seeder loads *every* known URL into an in-memory
+`Set` on every run. At 1.61M skills plus seen URLs that is ~3,200 paginated round trips and
+roughly 1 GB of heap, every night, for data that barely changes. With real SQL the query
+scales with the repo being scanned instead of with the corpus. This is the same bug class as
+the truncated preload already fixed in `d375723` — latent rather than absent.
+
+---
+
+## Phase 4 — Import the corpus
+
+- [ ] `scripts/build-corpus.ts` — DuckDB over the Parquet mirror → one local SQLite file
+- [ ] Apply the format gates: `frontmatter_valid = 1` and filename = `SKILL.md`
+      (1,877,981 → 1,610,957). Both are required by the Agent Skills spec and already
+      enforced by `seed.ts`
+- [ ] Backfill `score` with `validateSkill` — CPU only, no network
+- [ ] **Collision rule.** 005 cut bare-name collisions from 41.5% to 2.7%, but 2.7% of 1.61M
+      is **~43,000 rows** that still collide on `(owner, name)` with different content.
+      `ON CONFLICT DO NOTHING` would drop them silently — the exact failure 005 exists to
+      prevent. Build on `slugifySkillName`'s hash-suffix fallback
+- [ ] **Measure tag density** and decide D8's side table with data
+- [ ] Build FTS5 by `'rebuild'` *after* the bulk load, then create the triggers
+- [ ] `turso db create --from-file` — watch the **2 GB ceiling**; `--from-dump` is the
+      fallback
+- [ ] Re-verify the deployed API against the new database
+
+---
+
+## Phase 5 — Repo-level freshness
+
+- [ ] `watched_repos.head_sha` (or a new `repos` table for the imported corpus)
+- [ ] Conditional requests: `GET /repos/{o}/{r}/commits/{branch}` with `If-None-Match`.
+      **A 304 does not count against the GitHub rate limit** — this is what converts a
+      quota-bound sweep into a wall-clock-bound one
+- [ ] On a moved SHA, `GET /compare/{old}...{new}` — process only changed paths, and handle
+      deletions, which gives the dead-link reaper for free
+- [ ] Sizing: the corpus spans **282,200 repos**, not 1.61M skills. That is the unit count
+      that makes a regular sweep feasible at all
+
+---
+
+## Phase 6 — Long-tail freshness
+
+- [ ] Verify `source_url` on install/view and write the result back. 86.6% of the corpus is
+      single-owner and most rows will never be installed, so the hot set stays fresh for free
+      and the cold set costs nothing until someone wants it
+- [ ] Priority queue, oldest-checked-first, weighted by installs/score
+- [ ] Failure counter, so one transient 404 cannot de-list a live skill
+
+---
+
+## Phase 7 — Opt-out / takedown
+
+- [ ] `delisted` flag honoured by both search and install — an inert flag is worse than none
+- [ ] Documented request route
+- [ ] Decide the granularity: per-skill, per-repo or per-owner
+- [ ] Guarantee a re-import cannot resurrect a de-listed entry
+
+**Gate.** [BACKLOG.md](BACKLOG.md) places this *before* the imported corpus becomes publicly
+searchable. The corpus spans accounts that never opted in, and importing the full set rather
+than the ≥ 2-owner slice widens that from 23,081 owners to every account in the dataset.
+Freshness and consent are separate gates on the same milestone.
+
+---
+
+## Not scheduled
+
+- **GH Archive event stream.** Querying the public GitHub event firehose for pushes touching
+  `SKILL.md` paths would track the whole of GitHub without polling anyone. Only worth it if
+  the corpus grows past what phases 5–6 can enumerate.
+- **Semantic search / pgvector.** Carried over from [BACKLOG.md](BACKLOG.md); a separate
+  problem from ranking, and it now needs a non-Postgres answer.
