@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_OFFSET } from "../db/pagination.js";
 
 // --- Database row type ---
 
@@ -55,7 +56,8 @@ export const searchSkillsetsSchema = z.object({
   // relevance, a browse defaults to installs.
   sort: z.enum(["relevance", "installs", "score", "recent", "name"]).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
-  offset: z.coerce.number().int().min(0).default(0),
+  // Same cap as skills, so the two endpoints keep one contract.
+  offset: z.coerce.number().int().min(0).max(MAX_OFFSET).default(0),
 });
 
 export type SearchSkillsetsQuery = z.infer<typeof searchSkillsetsSchema>;

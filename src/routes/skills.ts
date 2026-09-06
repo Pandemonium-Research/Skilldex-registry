@@ -1,6 +1,9 @@
 import { Hono } from "hono";
 import { searchSkillsSchema, skillRowToApi } from "../types/skill.js";
 import { searchSkills, getSkill, getSkillByBareName } from "../db/skills.js";
+import { CACHE_DETAIL } from "../middleware/cache.js";
+import { MAX_OFFSET } from "../db/pagination.js";
+import { invalidParams } from "./shared.js";
 
 export const skillsRoutes = new Hono();
 
@@ -9,20 +12,22 @@ skillsRoutes.get("/", async (c) => {
   const raw = Object.fromEntries(new URL(c.req.url).searchParams);
   const parsed = searchSkillsSchema.safeParse(raw);
 
-  if (!parsed.success) {
-    return c.json(
-      { error: "Invalid query parameters", code: "INVALID_PARAMS" },
-      400
-    );
-  }
+  if (!parsed.success) return invalidParams(c, parsed.error);
 
-  const { skills, total } = await searchSkills(parsed.data);
+  const { skills, total, total_relation, has_more } = await searchSkills(parsed.data);
 
   return c.json({
     skills: skills.map(skillRowToApi),
     total,
+    // "eq" — exact. "gte" — at least this many; the count stopped at the cap. Render it as
+    // "10,000+", never as a bare 10000. Same contract as Elasticsearch's hits.total.relation.
+    total_relation,
+    has_more,
     limit: parsed.data.limit,
     offset: parsed.data.offset,
+    // One source of truth for when a client should stop paginating, so the cap is not
+    // duplicated in every consumer.
+    max_offset: MAX_OFFSET,
   });
 });
 
@@ -36,6 +41,10 @@ skillsRoutes.get("/:owner/:name", async (c) => {
     return c.json({ error: "Skill not found", code: "NOT_FOUND" }, 404);
   }
 
+  // Set here rather than by middleware: a "/skills/*" mount would also capture
+  // /skills/:name/install, which increments install_count and must never be cached.
+  // Only the success path gets a header, so a 404 is never pinned at the edge.
+  c.header("Cache-Control", CACHE_DETAIL);
   return c.json(skillRowToApi(skill));
 });
 
@@ -62,5 +71,8 @@ skillsRoutes.get("/:name", async (c) => {
     return c.json({ error: "Skill not found", code: "NOT_FOUND" }, 404);
   }
 
+  // Success only. The 409 above stays uncached deliberately: ambiguity is data-dependent and
+  // flips the moment a second owner claims the name.
+  c.header("Cache-Control", CACHE_DETAIL);
   return c.json(skillRowToApi(skill));
 });

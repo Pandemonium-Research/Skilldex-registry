@@ -23,6 +23,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { validateSkill } from "../../src/validator/index.js";
+import { allSchemaStatements } from "../lib/schema.js";
 
 const args = process.argv.slice(2);
 const flag = (name: string, fallback: string) => {
@@ -42,8 +43,10 @@ for (const f of [OUT, `${OUT}-journal`, `${OUT}-wal`, `${OUT}-shm`]) if (existsS
 // --- output database -------------------------------------------------------
 // Schema WITHOUT the FTS triggers: they are created after the bulk load, and the index is
 // built once with 'rebuild'. Firing three triggers per row across 1.6M rows would dominate.
-const ddl = readFileSync(join(here, "..", "..", "schema", "sqlite", "001_schema.sql"), "utf-8");
-const statements = splitSql(ddl);
+// Every migration, not just 001 — a corpus DB is created from nothing, so it needs the full
+// end state. Naming one file here is how a fresh --from-file database silently ships an older
+// schema than production.
+const statements = allSchemaStatements();
 const out = createClient({ url: `file:${OUT}` });
 for (const s of statements) {
   if (/^CREATE TRIGGER/i.test(s)) continue;
@@ -113,9 +116,12 @@ for (const shard of shards) {
       : `https://github.com/${r.repo_full_name}`;
 
     batch.push({
+      // `source` is set here, at INSERT time, rather than by a later UPDATE. Relabelling
+      // 1.6M rows afterwards would fire skills_au per row and rewrite both FTS5 tables —
+      // see the note at the foot of schema/sqlite/002_source_and_stats.sql.
       sql: `INSERT INTO skills (id, name, display_name, owner, description, author, source_url,
-                                trust_tier, score, spec_version, tags, content_key)
-            VALUES (?,?,?,?,?,?,?,'community',?,'1.0',NULL,?)
+                                trust_tier, score, spec_version, tags, content_key, source)
+            VALUES (?,?,?,?,?,?,?,'community',?,'1.0',NULL,?,'imported')
             ON CONFLICT (owner, name) DO NOTHING`,
       args: [randomUUID(), String(r.final_slug), r.display_name == null ? null : String(r.display_name),
              owner, String(r.description ?? r.display_name ?? r.final_slug), owner, sourceUrl,
@@ -146,15 +152,3 @@ console.log(`\nwritten ${written.toLocaleString()} skills in ${((Date.now() - st
 console.log(`score 0 (unparseable/invalid): ${scored0.toLocaleString()}`);
 console.log(`file size: ${(size / 1e9).toFixed(2)} GB  — --from-file ceiling is 2 GB`);
 
-/** Split DDL into statements, keeping CREATE TRIGGER ... BEGIN ... END; intact. */
-function splitSql(sql: string): string[] {
-  const parts = sql.replace(/^\s*--.*$/gm, "").split(/;\s*(?=(?:[^']*'[^']*')*[^']*$)/)
-    .map((s) => s.trim()).filter(Boolean);
-  const merged: string[] = [];
-  for (const s of parts) {
-    const prev = merged[merged.length - 1];
-    if (prev && /\bBEGIN\b/i.test(prev) && !/\bEND\b\s*$/i.test(prev)) merged[merged.length - 1] = `${prev}; ${s}`;
-    else merged.push(s);
-  }
-  return merged;
-}

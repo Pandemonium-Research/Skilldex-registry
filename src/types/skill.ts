@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_OFFSET } from "../db/pagination.js";
 
 // --- Database row type ---
 
@@ -51,12 +52,23 @@ export const searchSkillsSchema = z.object({
   min_score: z.coerce.number().int().min(0).max(100).optional(),
   spec_version: z.string().optional(),
   tags: z.string().optional(), // comma-separated
+  owner: z.string().optional(),
+  // Which tier to search. "curated" is everything the seeder and publishers put here; "all"
+  // adds the imported corpus.
+  //
+  // Defaults to "curated" so existing callers — including published skilldex-cli builds —
+  // keep getting the small, meaningful, exactly-countable set rather than 1.6M rows in which
+  // every ordering signal is degenerate.
+  scope: z.enum(["curated", "all"]).default("curated"),
   // No static default: the effective sort depends on whether `q` is present, and that
   // cannot be expressed here. Resolved in the db layer — a text search defaults to
   // relevance, a browse defaults to installs.
   sort: z.enum(["relevance", "installs", "score", "recent", "name"]).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
-  offset: z.coerce.number().int().min(0).default(0),
+  // Capped, and the cap MUST equal the count cap. LIMIT 20 OFFSET 100000 walks 100,000 index
+  // entries; deep pages cannot be served regardless of what the count says, so refusing them
+  // is more honest than timing out on them.
+  offset: z.coerce.number().int().min(0).max(MAX_OFFSET).default(0),
 });
 
 export type SearchSkillsQuery = z.infer<typeof searchSkillsSchema>;

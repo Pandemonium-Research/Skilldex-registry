@@ -18,6 +18,7 @@
  * the only genuine usage signal in the registry, and what D10 makes the default sort read.
  */
 import { createClient } from "@libsql/client";
+import { refreshStats, refreshTagCounts } from "../../src/db/stats.js";
 
 const args = process.argv.slice(2);
 const i = args.indexOf("--out");
@@ -83,11 +84,16 @@ const rows = await readAll("skills",
    score, spec_version, tags, install_count, content_key, published_at`);
 console.log(`  read ${rows.length.toLocaleString()} live skills`);
 
+// `source` is written explicitly, on BOTH paths. These rows come from the live registry, so
+// they belong to the curated tier — and on the conflict path they are overwriting a corpus row
+// that is already marked 'imported'. Omitting it from DO UPDATE would leave every overlapping
+// skill (498 at last merge) misfiled as corpus, which is exactly the set most likely to be
+// browsed: the ones a watched repo and the corpus both carry.
 const SQL = `
 INSERT INTO skills (id, name, display_name, owner, description, author, source_url,
                     trust_tier, score, spec_version, tags, install_count, content_key,
-                    published_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    published_at, source)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'seeded')
 ON CONFLICT (owner, name) DO UPDATE SET
   display_name  = excluded.display_name,
   description   = excluded.description,
@@ -101,7 +107,8 @@ ON CONFLICT (owner, name) DO UPDATE SET
   -- content_key becomes null for a row the registry owns rather than the corpus. The unique
   -- index on it is partial (WHERE content_key IS NOT NULL), so nulls never collide.
   content_key   = excluded.content_key,
-  published_at  = excluded.published_at`;
+  published_at  = excluded.published_at,
+  source        = excluded.source`;
 
 let done = 0;
 for (let j = 0; j < rows.length; j += 500) {
@@ -126,3 +133,13 @@ for (const t of ["skills_fts", "skills_trgm"]) {
   await out.execute(`INSERT INTO ${t}(${t}) VALUES('integrity-check')`);
   console.log(`  ${t} integrity OK`);
 }
+
+// Load-bearing: build.ts writes the stats, then this script changes the row count. Without a
+// refresh here the uploaded database ships a headline count that is short by the merge delta.
+const stats = await refreshStats(out);
+const tags = await refreshTagCounts(out);
+console.log(
+  `\nstats: ${stats.skills_total.toLocaleString()} skills ` +
+    `(${stats.skills_curated.toLocaleString()} curated, ${stats.skills_imported.toLocaleString()} imported), ` +
+    `${stats.owners_total.toLocaleString()} owners, ${tags} distinct tags`
+);

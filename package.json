@@ -1,7 +1,7 @@
 {
   "name": "skilldex-registry",
   "version": "1.0.0",
-  "description": "Backend API and metadata store for Skilldex — indexes .skill packages, serves metadata, handles search, manages trust tiers",
+  "description": "Backend API and metadata store for Skilldex \u2014 indexes .skill packages, serves metadata, handles search, manages trust tiers",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
@@ -19,7 +19,8 @@
     "preflight:005": "tsx --env-file=.env scripts/preflight-005.ts",
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "migrate:turso": "tsx --env-file=.env scripts/migrate-to-turso.ts",
-    "parity:api": "tsx --env-file=.env scripts/verify-api-parity.ts"
+    "parity:api": "tsx --env-file=.env scripts/verify-api-parity.ts",
+    "migrate": "tsx --env-file=.env scripts/migrate.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.8",

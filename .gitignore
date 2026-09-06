@@ -10,4 +10,8 @@ SKILLDEX_REGISTRY_SPEC.md
 SKILLDEX_STATUS.md
 SKILLDEX_WEB_PLAN.md
 SKILLDEX_REGISTRY_IMPLEMENTATION_PLAN.md
-ADMIN_CMDS.mdbuild/
+ADMIN_CMDS.md
+
+# Corpus build artifacts — registry.db is ~1.9GB, corpus-build.duckdb ~1.2GB
+build/
+

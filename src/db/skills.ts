@@ -1,5 +1,13 @@
 import { getDb } from "./client.js";
 import { toSkillRow, jsonOrNull } from "./rows.js";
+import {
+  boundedCountSql,
+  countLimitArg,
+  interpretCount,
+  takePage,
+  type TotalRelation,
+} from "./pagination.js";
+import { READ_STAT_SQL } from "./stats.js";
 import type { SkillRow } from "../types/skill.js";
 import type { SearchSkillsQuery } from "../types/skill.js";
 import type { InArgs } from "@libsql/client";
@@ -60,40 +68,67 @@ export function toFtsQuery(q: string): string | null {
   return terms.length ? terms.join(" AND ") : null;
 }
 
-export async function searchSkills(
-  params: SearchSkillsQuery
-): Promise<{ skills: SkillRow[]; total: number }> {
+export interface SearchSkillsResult {
+  skills: SkillRow[];
+  /** Exact when `total_relation` is "eq"; a lower bound when "gte". */
+  total: number;
+  total_relation: TotalRelation;
+  has_more: boolean;
+}
+
+export async function searchSkills(params: SearchSkillsQuery): Promise<SearchSkillsResult> {
   const db = getDb();
   const where: string[] = [];
-  const args: InArgs = [];
+  const whereArgs: InArgs = [];
 
   // Full-text search over name + description.
-  let from = "skills s";
+  //
+  // Two FROM clauses, because the page needs a rank and the count does not. bm25() is an FTS5
+  // auxiliary function evaluated per matched row, so dropping it from the count subquery
+  // avoids scoring the entire match set purely to count it.
+  //
+  // The rank stays inside an FTS-only subquery: `m` is then an ordinary relation the outer
+  // query can filter and order freely. This was originally needed because bm25() is rejected
+  // ("unable to use function bm25 in the requested context") alongside a window function.
+  // The window function is gone, but the subquery stays — the payoff from removing it is
+  // unmeasured and the failure mode is a 500 on every search.
   const fts = params.q ? toFtsQuery(params.q) : null;
-  if (fts) {
-    // The rank is computed inside an FTS-only subquery. bm25() is an FTS5 auxiliary function
-    // and is rejected ("unable to use function bm25 in the requested context") when the outer
-    // query also carries a window function, so it cannot simply be joined and sorted on.
-    // `m` is then an ordinary relation the outer query can filter, count and order freely.
-    from =
-      "skills s JOIN (SELECT rowid AS seq, bm25(skills_fts) AS rank" +
-      " FROM skills_fts WHERE skills_fts MATCH ?) m ON m.seq = s.seq";
-    args.push(fts); // bound first: it sits in FROM, ahead of every WHERE placeholder
+  const ftsArgs: InArgs = fts ? [fts] : []; // bound first: FROM precedes every WHERE placeholder
+  const fromPage = fts
+    ? "skills s JOIN (SELECT rowid AS seq, bm25(skills_fts) AS rank" +
+      " FROM skills_fts WHERE skills_fts MATCH ?) m ON m.seq = s.seq"
+    : "skills s";
+  const fromCount = fts
+    ? "skills s JOIN (SELECT rowid AS seq" +
+      " FROM skills_fts WHERE skills_fts MATCH ?) m ON m.seq = s.seq"
+    : "skills s";
+
+  // Curated tier only, by default. Every orderable signal in the registry lives in the ~4,863
+  // rows that came from watched repos rather than the corpus import — see
+  // REGISTRY_BROWSE_REDESIGN_PLAN.md. `skills_curated_installs_idx` is partial on exactly this
+  // predicate, so the planner serves the default browse from a ~4.8k-entry index.
+  if (params.scope === "curated") {
+    where.push("s.source <> 'imported'");
   }
 
   if (params.tier) {
     where.push("s.trust_tier = ?");
-    args.push(params.tier);
+    whereArgs.push(params.tier);
   }
 
   if (params.min_score !== undefined) {
     where.push("s.score >= ?");
-    args.push(params.min_score);
+    whereArgs.push(params.min_score);
   }
 
   if (params.spec_version) {
     where.push("s.spec_version = ?");
-    args.push(params.spec_version);
+    whereArgs.push(params.spec_version);
+  }
+
+  if (params.owner) {
+    where.push("s.owner = ?");
+    whereArgs.push(params.owner);
   }
 
   if (params.tags) {
@@ -106,26 +141,70 @@ export async function searchSkills(
           .map(() => "?")
           .join(", ")}))`
       );
-      args.push(...tagList);
+      whereArgs.push(...tagList);
     }
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const orderSql = SORT_MAP[resolveSort(params.sort, Boolean(fts))] ?? SORT_MAP.installs;
 
-  // count(*) OVER () returns the unpaginated total alongside the page, so the whole search
-  // is one round trip rather than a query plus a count.
-  const result = await db.execute({
-    sql: `SELECT s.*, count(*) OVER () AS __total
-          FROM ${from} ${whereSql}
+  // limit + 1 so has_more is exact without a second query. Sliced immediately by takePage, so
+  // no caller can observe the extra row.
+  const pageStmt = {
+    sql: `SELECT s.* FROM ${fromPage} ${whereSql}
           ORDER BY ${orderSql}
           LIMIT ? OFFSET ?`,
-    args: [...args, params.limit, params.offset],
-  });
+    args: [...ftsArgs, ...whereArgs, params.limit + 1, params.offset],
+  };
 
+  // Derived from the predicate that was actually built, not by re-reading params. Testing
+  // `params.tier || params.q || ...` drifts the first time someone adds a filter.
+  const unfiltered = where.length === 0 && !fts;
+
+  if (unfiltered) {
+    try {
+      const [pageRes, statRes] = await db.batch(
+        [pageStmt, { sql: READ_STAT_SQL, args: ["skills_total"] }],
+        "read"
+      );
+      if (statRes.rows.length) {
+        const { page, has_more } = takePage(pageRes.rows, params.limit);
+        return {
+          skills: page.map(toSkillRow),
+          total: Number(statRes.rows[0].value),
+          total_relation: "eq",
+          has_more,
+        };
+      }
+      // Row absent — a fresh database whose stats have never been refreshed. Fall through to
+      // the bounded count. Deliberately NOT count(*): that reintroduces the >90s timeout in
+      // precisely the case this design exists to prevent, on the hottest path in the API.
+    } catch {
+      // registry_stats missing entirely — migration 002 not applied. Degrade to the bounded
+      // count rather than 500 the listing.
+    }
+  }
+
+  // One HTTP round trip, not two. Latency here is dominated by the Turso round trip (the query
+  // itself is single-digit milliseconds), so issuing the page and the count separately would
+  // double the cost of every search. batch() sends both in one request, which preserves the
+  // property the original count(*) OVER () comment was written to defend.
+  const [pageRes, countRes] = await db.batch(
+    [
+      pageStmt,
+      {
+        sql: boundedCountSql(fromCount, whereSql),
+        args: [...ftsArgs, ...whereArgs, countLimitArg()],
+      },
+    ],
+    "read"
+  );
+
+  const { page, has_more } = takePage(pageRes.rows, params.limit);
   return {
-    skills: result.rows.map(toSkillRow),
-    total: result.rows.length ? Number(result.rows[0].__total) : 0,
+    skills: page.map(toSkillRow),
+    ...interpretCount(Number(countRes.rows[0].n)),
+    has_more,
   };
 }
 

@@ -18,6 +18,7 @@ import { getDb } from "../src/db/client.js";
 import { fetchSkillFromGitHub } from "../src/github/fetch.js";
 import { validateSkill } from "../src/validator/index.js";
 import { slugifySkillName } from "../src/types/skill.js";
+import { refreshStats, refreshTagCounts } from "../src/db/stats.js";
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
@@ -368,6 +369,22 @@ async function seed() {
   console.log(
     `\nDone! Inserted: ${totalInserted}, Skipped: ${totalSkipped}, Failed: ${totalFailed}`
   );
+
+  // The registry's headline counts are precomputed — nothing on a request path may run
+  // count(*) against a 1.6M-row table. This is the only regularly-scheduled job that touches
+  // the database, so if it stops refreshing them the numbers silently freeze at whatever the
+  // last run wrote. Failure here must not fail the sync: stale counts are a cosmetic problem,
+  // a failed seed is not.
+  try {
+    const stats = await refreshStats(db);
+    const tags = await refreshTagCounts(db);
+    console.log(
+      `Stats refreshed: ${stats.skills_total.toLocaleString()} skills ` +
+        `(${stats.skills_curated.toLocaleString()} curated), ${tags} distinct tags`
+    );
+  } catch (err: any) {
+    console.warn(`Stats refresh failed (counts will be stale): ${err?.message ?? err}`);
+  }
 }
 
 seed().catch((err) => {

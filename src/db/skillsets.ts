@@ -1,6 +1,14 @@
 import { getDb } from "./client.js";
 import { toSkillsetRow, jsonOrNull } from "./rows.js";
 import { toFtsQuery, resolveSort } from "./skills.js";
+import {
+  boundedCountSql,
+  countLimitArg,
+  interpretCount,
+  takePage,
+  type TotalRelation,
+} from "./pagination.js";
+import { READ_STAT_SQL } from "./stats.js";
 import type { SkillsetRow } from "../types/skillset.js";
 import type { SearchSkillsetsQuery } from "../types/skillset.js";
 import type { InArgs } from "@libsql/client";
@@ -14,39 +22,53 @@ const SORT_MAP: Record<string, string> = {
   name: "s.name ASC, s.seq ASC",
 };
 
+export interface SearchSkillsetsResult {
+  skillsets: SkillsetRow[];
+  total: number;
+  total_relation: TotalRelation;
+  has_more: boolean;
+}
+
+/**
+ * Mirrors searchSkills. There is no `scope` here: skillsets have no imported corpus, so the
+ * whole table is curated and there is nothing to narrow to.
+ *
+ * The count(*) OVER () this replaces was never measured — the skillsets table is small enough
+ * that it was never a problem. Changing it is defensive, keeping the two endpoints on one
+ * contract, rather than corrective.
+ */
 export async function searchSkillsets(
   params: SearchSkillsetsQuery
-): Promise<{ skillsets: SkillsetRow[]; total: number }> {
+): Promise<SearchSkillsetsResult> {
   const db = getDb();
   const where: string[] = [];
-  const args: InArgs = [];
+  const whereArgs: InArgs = [];
 
-  let from = "skillsets s";
+  // Two FROM clauses: the page needs bm25, the count does not. See db/skills.ts.
   const fts = params.q ? toFtsQuery(params.q) : null;
-  if (fts) {
-    // The rank is computed inside an FTS-only subquery. bm25() is an FTS5 auxiliary function
-    // and is rejected ("unable to use function bm25 in the requested context") when the outer
-    // query also carries a window function, so it cannot simply be joined and sorted on.
-    // `m` is then an ordinary relation the outer query can filter, count and order freely.
-    from =
-      "skillsets s JOIN (SELECT rowid AS seq, bm25(skillsets_fts) AS rank" +
-      " FROM skillsets_fts WHERE skillsets_fts MATCH ?) m ON m.seq = s.seq";
-    args.push(fts); // bound first: it sits in FROM, ahead of every WHERE placeholder
-  }
+  const ftsArgs: InArgs = fts ? [fts] : []; // bound first: FROM precedes every WHERE placeholder
+  const fromPage = fts
+    ? "skillsets s JOIN (SELECT rowid AS seq, bm25(skillsets_fts) AS rank" +
+      " FROM skillsets_fts WHERE skillsets_fts MATCH ?) m ON m.seq = s.seq"
+    : "skillsets s";
+  const fromCount = fts
+    ? "skillsets s JOIN (SELECT rowid AS seq" +
+      " FROM skillsets_fts WHERE skillsets_fts MATCH ?) m ON m.seq = s.seq"
+    : "skillsets s";
 
   if (params.tier) {
     where.push("s.trust_tier = ?");
-    args.push(params.tier);
+    whereArgs.push(params.tier);
   }
 
   if (params.min_score !== undefined) {
     where.push("s.score >= ?");
-    args.push(params.min_score);
+    whereArgs.push(params.min_score);
   }
 
   if (params.spec_version) {
     where.push("s.spec_version = ?");
-    args.push(params.spec_version);
+    whereArgs.push(params.spec_version);
   }
 
   if (params.tags) {
@@ -57,24 +79,58 @@ export async function searchSkillsets(
           .map(() => "?")
           .join(", ")}))`
       );
-      args.push(...tagList);
+      whereArgs.push(...tagList);
     }
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const orderSql = SORT_MAP[resolveSort(params.sort, Boolean(fts))] ?? SORT_MAP.installs;
 
-  const result = await db.execute({
-    sql: `SELECT s.*, count(*) OVER () AS __total
-          FROM ${from} ${whereSql}
+  const pageStmt = {
+    sql: `SELECT s.* FROM ${fromPage} ${whereSql}
           ORDER BY ${orderSql}
           LIMIT ? OFFSET ?`,
-    args: [...args, params.limit, params.offset],
-  });
+    args: [...ftsArgs, ...whereArgs, params.limit + 1, params.offset],
+  };
 
+  const unfiltered = where.length === 0 && !fts;
+
+  if (unfiltered) {
+    try {
+      const [pageRes, statRes] = await db.batch(
+        [pageStmt, { sql: READ_STAT_SQL, args: ["skillsets_total"] }],
+        "read"
+      );
+      if (statRes.rows.length) {
+        const { page, has_more } = takePage(pageRes.rows, params.limit);
+        return {
+          skillsets: page.map(toSkillsetRow),
+          total: Number(statRes.rows[0].value),
+          total_relation: "eq",
+          has_more,
+        };
+      }
+    } catch {
+      // registry_stats absent or unpopulated — degrade to the bounded count, never count(*).
+    }
+  }
+
+  const [pageRes, countRes] = await db.batch(
+    [
+      pageStmt,
+      {
+        sql: boundedCountSql(fromCount, whereSql),
+        args: [...ftsArgs, ...whereArgs, countLimitArg()],
+      },
+    ],
+    "read"
+  );
+
+  const { page, has_more } = takePage(pageRes.rows, params.limit);
   return {
-    skillsets: result.rows.map(toSkillsetRow),
-    total: result.rows.length ? Number(result.rows[0].__total) : 0,
+    skillsets: page.map(toSkillsetRow),
+    ...interpretCount(Number(countRes.rows[0].n)),
+    has_more,
   };
 }
 
