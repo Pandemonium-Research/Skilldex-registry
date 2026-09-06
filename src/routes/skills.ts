@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { searchSkillsSchema, skillRowToApi } from "../types/skill.js";
 import { searchSkills, getSkill, getSkillByBareName } from "../db/skills.js";
-import { CACHE_DETAIL } from "../middleware/cache.js";
+import { CACHE_DETAIL, CACHE_LIST } from "../middleware/cache.js";
 import { MAX_OFFSET } from "../db/pagination.js";
 import { invalidParams } from "./shared.js";
 
@@ -16,6 +16,8 @@ skillsRoutes.get("/", async (c) => {
 
   const { skills, total, total_relation, has_more } = await searchSkills(parsed.data);
 
+  // On the success path only, so a 400 above is never cached at the edge.
+  c.header("Cache-Control", CACHE_LIST);
   return c.json({
     skills: skills.map(skillRowToApi),
     total,

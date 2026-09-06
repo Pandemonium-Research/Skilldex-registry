@@ -121,6 +121,12 @@ describe("GET /v1/skills", () => {
     expect(body.skills[0].name).toBe("kubernetes-debug");
   });
 
+  // ⚠ This asserts the header is produced, NOT that it survives deployment. An earlier version
+  // set it from middleware after `await next()`; this test passed and the deployed API still
+  // showed Vercel's default with x-vercel-cache: MISS, because the Vercel adapter reads the
+  // response before a post-next mutation lands. Only `curl -I` against the deployment can
+  // confirm the real behaviour — check `x-vercel-cache`, not `cache-control`, since Vercel
+  // consumes s-maxage and rewrites what it sends the browser.
   it("caches successful reads but not validation failures", async () => {
     await insert(1);
 

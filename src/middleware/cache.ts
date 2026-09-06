@@ -30,41 +30,42 @@ export const CACHE_STATS = "public, max-age=60, s-maxage=300, stale-while-revali
 export const CACHE_STATIC = "public, max-age=300, s-maxage=3600, stale-while-revalidate=86400";
 
 /**
- * Attach a Cache-Control header to successful reads.
+ * ⚠ Set these headers INSIDE a route handler, on the success path, e.g.
  *
- * Deliberately narrow: only GET, only 200. Anything else — a 404, a 409 AMBIGUOUS_NAME, a 429,
- * a 500 — is left uncached, so a transient failure cannot be pinned at the edge for the length
- * of the TTL.
+ *     c.header("Cache-Control", CACHE_LIST);
+ *     return c.json(body);
  *
- * Mount on exact paths only. `v1.use("/skills/*", ...)` would also match
- * `/skills/:name/install`, which increments install_count and must never be cached.
+ * NOT from middleware after `await next()`. That form works under Hono's in-process
+ * `app.request()` — a test asserting it will pass — but the header is lost by the Vercel
+ * adapter, which reads the response before the post-next mutation lands. Measured on the
+ * deployed API: a middleware-set policy produced Vercel's default
+ * `public, max-age=0, must-revalidate` with `x-vercel-cache: MISS` on every request, while the
+ * identical policy set inside a handler produced `x-vercel-cache: HIT`.
+ *
+ * Setting it on the success return also gates it for free: a 404, a 409 AMBIGUOUS_NAME or a
+ * 400 never reaches the line, so a transient failure cannot be pinned at the edge for the
+ * length of the TTL.
+ *
+ * Vercel strips `s-maxage` from what it sends the browser and reports `public, max-age=0`,
+ * having consumed the directive for edge caching. `x-vercel-cache`, not `cache-control`, is
+ * what tells you whether it worked.
  */
-export function cache(policy: string): MiddlewareHandler {
-  return async (c, next) => {
-    await next();
-
-    if (c.req.method !== "GET") return;
-    if (c.res.status !== 200) return;
-
-    c.header("Cache-Control", policy);
-  };
-}
 
 /**
  * Explicitly forbid caching.
  *
- * Applied unconditionally — including to error responses — because the routes that need it are
- * the ones where a cached response is actively harmful: `/auth/*` carries tokens, and the
- * install endpoints are GETs that increment `install_count`, so an edge-cached response would
- * silently stop counting installs.
+ * Set BEFORE `next()`, which is why this one can stay middleware — no status gate is wanted
+ * here, and headers set before the handler runs survive the adapter (the rate limiter relies
+ * on the same thing).
  *
- * Vercel does not cache a response with no Cache-Control, so this is belt-and-braces rather
- * than a fix for present behaviour. It is here so that adding a broad cache rule later cannot
- * quietly capture these routes.
+ * A response with no Cache-Control is not edge-cached by Vercel anyway, so this is
+ * belt-and-braces: it exists so that adding a broad cache rule later cannot quietly capture
+ * `/auth/*` (which carries tokens) or the install endpoints (GETs that increment
+ * install_count, where an edge hit would silently stop counting installs).
  */
 export function noStore(): MiddlewareHandler {
   return async (c, next) => {
-    await next();
     c.header("Cache-Control", "no-store");
+    await next();
   };
 }

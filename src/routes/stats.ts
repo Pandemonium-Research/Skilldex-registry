@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { readStats, readTagCounts } from "../db/stats.js";
+import { CACHE_STATS } from "../middleware/cache.js";
 
 export const statsRoutes = new Hono();
 
@@ -24,6 +25,7 @@ statsRoutes.get("/", async (c) => {
   }
 
   const v = stats.values;
+  c.header("Cache-Control", CACHE_STATS);
   return c.json({
     skills: {
       total: v.skills_total ?? 0,
@@ -47,7 +49,9 @@ export const tagsRoutes = new Hono();
 
 tagsRoutes.get("/", async (c) => {
   try {
-    return c.json({ tags: await readTagCounts() });
+    const tags = await readTagCounts();
+    c.header("Cache-Control", CACHE_STATS);
+    return c.json({ tags });
   } catch {
     return c.json({ tags: [] });
   }
