@@ -835,3 +835,89 @@ updating only the ~4,863 rows with a null `content_key` reaches the same end sta
 0.3% of the table.
 
 **Still not cut over.** `TURSO_DATABASE_URL` points at `skilldex-registry`.
+
+---
+
+## 13. Cutover, 2026-09-06
+
+`TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` repointed at `skilldex-registry-v2` in Vercel and
+redeployed. **The registry now serves 1,615,322 skills.**
+
+Both variables change, not one — Turso tokens are scoped per database, so moving only the URL
+gives a 401 on every request.
+
+### Pre-flight, before anything was repointed
+
+Run because the corpus build had already shipped once with four empty support tables (§7). The
+check is that v2 never has *fewer* rows than live, not that the two match.
+
+| Table | live | v2 |
+|---|---|---|
+| skills | 4,863 | 1,615,322 |
+| watched_repos | 17 | **17** |
+| seen_source_urls | 10,932 | **10,932** |
+| publishers | 1 | 1 |
+| spec_versions | 1 | 1 |
+| skillsets | 0 | 0 |
+| registry_stats / tag_counts / delistings | 6 / 11 / 0 | 6 / 11 / 0 |
+
+`integrity-check` clean on `skills_fts`, `skills_trgm` and `skillsets_fts`; 25 randomly sampled
+live skills all present in v2.
+
+`watched_repos` at 17 is the one that matters most — cutting over with it empty leaves the
+nightly seeder with nothing to scan, which is exactly the failure the first corpus build had.
+
+### After cutover, against production
+
+| Check | Result |
+|---|---|
+| **30 random pre-cutover skills re-fetched over HTTP** | **30/30 resolve** |
+| Default listing | 0.63s, `total=1615322 eq` |
+| `?source=seeded` | 0.58s (87s before D19) |
+| `tier=verified` | 0.57s |
+| `/v1/stats` / `/v1/tags` | 0.53s / 0.32s |
+| `offset=99999` | 400 `OFFSET_TOO_LARGE` |
+| Website `/registry` | 200, four category strips, headline `1,615,322` / `158,915` |
+| `/registry/{owner}/{name}` | 200 |
+
+The 30/30 is the check that matters: the merge kept live rows as incumbents specifically so no
+url that resolved before cutover would 404 after it.
+
+### Search: 13s cold, 0.10s warm
+
+| `q=pdf` | Time |
+|---|---|
+| First request (cold) | **13.2s** |
+| Repeat | **0.10s** |
+
+The CDN absorbs it for anything popular, but the first person to search an uncached term pays
+full price. This is phase 9, and the cold number — not the warm one — is the target.
+
+Note the earlier direct-to-database benchmark said 3.8s for the same query (§11). Production is
+slower because it adds the Vercel function round trip on top, and because "cold" there means
+both an empty CDN entry *and* a cold Turso page cache. **Three separate numbers for one query
+depending on what is warm** — worth stating explicitly, since two of them have already been
+quoted as if they were the query cost.
+
+### A false alarm worth recording
+
+An initial url check reported four skills as missing. They were not: the check script's HTTPS
+requests were failing in that context and the error was being reported as a missing skill. The
+same skill returned 200 immediately via `curl`.
+
+The mistake was reporting a tool failure as a finding. `getattr(e, 'code', 'ERR')` collapsed a
+transport error and a 404 into one output, so a broken check looked like broken data — during a
+cutover, which is the worst possible moment for a false positive. **Verify the instrument before
+reporting what it measured**, especially when it says something alarming.
+
+### Rollback
+
+Point both variables back at `skilldex-registry` and redeploy. That database is untouched and
+stays authoritative until it is deliberately retired. **Do not delete it.**
+
+### Still pointing at the old database, deliberately
+
+**GitHub repo secrets.** The nightly workflow has its own copy and is disabled. Phase 8 must
+land before it runs against the corpus — specifically the `source_url` reconciliation, where a
+mismatch of one trailing slash makes every imported watched-repo skill look new and get
+re-inserted.

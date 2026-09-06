@@ -20,13 +20,13 @@ Effort figures are estimates, not commitments.
 | **1** | Schema + migrate live rows + parity check | 1d | ✅ done |
 | **2** | Rewrite `src/db/*`; replace Supabase Auth | 2–3d | ✅ **done and deployed** |
 | **3** | Port `seed.ts` to Turso **and** kill the global preload | 1d | ✅ done |
-| **4** | Import the corpus | 2d | 🟡 built, merged, uploaded — **not cut over** |
+| **4** | Import the corpus | 2d | ✅ **done — cut over, serving 1,615,322 skills** |
 | **4b** | Counting fix, curated split, browse redesign | 2d | ✅ **done and deployed** |
 | **5** | Freshness #1+2 — repo SHA polling, compare diffs | 1.5d | ⬜ |
 | **6** | Freshness #4+5 — verify-on-read, priority queue | 1d | ⬜ |
 | **7** | Opt-out / takedown path | 1d | ✅ **done** — was the gate on the corpus going live |
 | **8** | Realign the nightly seeder with the imported corpus | 1–1.5d | ⬜ |
-| **9** | Free-text search latency at corpus scale | 1d | ⬜ **after cutover** |
+| **9** | Free-text search latency at corpus scale | 1d | ⬜ **next** — 13s cold, 0.10s warm |
 
 ---
 
@@ -127,9 +127,9 @@ the truncated preload already fixed in `d375723` — latent rather than absent.
 
 ---
 
-## Phase 4 — Import the corpus 🟡
+## Phase 4 — Import the corpus ✅
 
-**Built, merged, uploaded and now schema-current. Nothing points at it yet.**
+**Cut over 2026-09-06. The registry serves 1,615,322 skills.** Verification in FINDINGS §13.
 
 - [x] Corpus brought up to migrations 002 + 003 by `scripts/prepare-corpus-db.ts` — the
       flipped-default patch, so only ~4,863 rows are relabelled rather than 1.6M
@@ -140,9 +140,20 @@ the truncated preload already fixed in `d375723` — latent rather than absent.
       **>90s timeout → 1,338ms** with an exact total. FINDINGS §11
 - [x] Two scale-only faults found and fixed in the process: `?source=seeded` taking 87s (D19),
       and the FTS count doing a needless rowid lookup per match
-- [ ] **Cut over** — point `TURSO_DATABASE_URL` at `skilldex-registry-v2`, redeploy, keep the
-      old database for rollback
-- [ ] **Then** switch `seed.ts` to `tree/HEAD` (D14) — never before
+- [x] **Pre-flight before repointing anything** — every support table present with counts at
+      least matching live (`watched_repos` 17, `seen_source_urls` 10,932), FTS integrity clean
+      on all three indexes, 25 random live skills present. Run because the first corpus build
+      shipped with four empty tables
+- [x] **Cut over** — `TURSO_DATABASE_URL` *and* `TURSO_AUTH_TOKEN` repointed (tokens are scoped
+      per database; moving only the URL gives a 401), then redeployed
+- [x] **30 random pre-cutover skills re-fetched over HTTP: 30/30 resolve.** No orphaned urls —
+      which is what merging live rows as incumbents was for
+- [ ] **Switch `seed.ts` to `tree/HEAD`** (D14). Now unblocked — cutover has happened, so this
+      is safe whenever. Doing it before cutover would have orphaned all 15,767 urls
+- [ ] **Retire `skilldex-registry`** once confidence is established. It is the rollback: point
+      both variables back and redeploy. **Do not delete it yet**
+- [ ] **GitHub repo secrets still point at the old database** — deliberately. The nightly
+      workflow is disabled and phase 8 must land before it runs against the corpus
 
 ⚠ Free-text search is now the slowest path — see phase 9, deliberately deferred until after
 cutover.
@@ -354,11 +365,20 @@ the corpus.
 
 ## Phase 9 — Free-text search latency
 
-**Deliberately after cutover.** Search works and is cacheable; tuning it against a database
-nothing points at would be optimising in the dark, and the real access pattern is unknown until
-the corpus is live. Measure what people actually search for first.
+**Now unblocked — cutover has happened.** Measured in production (FINDINGS §13):
 
-Measured on 1,615,322 rows (FINDINGS §11), warm:
+| `q=pdf` | Time |
+|---|---|
+| First request (cold) | **13.2s** |
+| Repeat | **0.10s** |
+
+⚠ **The cold number is the target, not the warm one.** The CDN absorbs repeats, so anything
+popular is fast, but the first person to search an uncached term waits 13 seconds. Note there
+are now three numbers for the same query depending on what is warm — 3.8s direct to the
+database, 13.2s cold through Vercel, 0.10s cached — and two of them have already been quoted as
+if they were the query cost.
+
+Measured direct-to-database on 1,615,322 rows (FINDINGS §11), warm:
 
 | Query | Time | Matches |
 |---|---|---|

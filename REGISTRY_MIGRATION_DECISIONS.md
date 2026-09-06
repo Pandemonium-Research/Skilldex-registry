@@ -7,6 +7,11 @@ corpus measurements in [FINDINGS.md](FINDINGS.md); import state in [IMPORT_STATU
 Each decision records what would reverse it. Nothing here is permanent — the corpus can be
 rebuilt from the dataset DOI at any time.
 
+**Status, 2026-09-06: cut over.** The registry serves 1,615,322 skills from
+`skilldex-registry-v2`. `skilldex-registry` (4,863 rows) is retained as the rollback target and
+must not be deleted. Verification in
+[REGISTRY_MIGRATION_FINDINGS.md](REGISTRY_MIGRATION_FINDINGS.md) §13.
+
 ---
 
 ## D1 — Move to Turso (SQLite), not a managed Postgres
