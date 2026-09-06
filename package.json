@@ -1,7 +1,7 @@
 {
   "name": "skilldex-registry",
   "version": "1.0.0",
-  "description": "Backend API and metadata store for Skilldex — indexes .skill packages, serves metadata, handles search, manages trust tiers",
+  "description": "Backend API and metadata store for Skilldex \u2014 indexes .skill packages, serves metadata, handles search, manages trust tiers",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
@@ -17,10 +17,12 @@
     "add-repo": "tsx --env-file=.env scripts/add-repo.ts",
     "rescore": "tsx --env-file=.env scripts/rescore.ts",
     "preflight:005": "tsx --env-file=.env scripts/preflight-005.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "migrate:turso": "tsx --env-file=.env scripts/migrate-to-turso.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.8",
+    "@libsql/client": "^0.18.0",
     "@supabase/supabase-js": "^2.49.4",
     "hono": "^4.7.6",
     "yaml": "^2.7.1",
