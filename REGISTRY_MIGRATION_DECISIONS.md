@@ -351,6 +351,52 @@ would have shipped.
 
 ---
 
+## D14 — Imported `source_url` uses `tree/HEAD`, not a branch name
+
+**Decision.** Imported skills get
+`https://github.com/{repo_full_name}/tree/HEAD/{dir}` — or the repo root when the SKILL.md is
+at the top level.
+
+**Why not a branch name.** The GitSkills `repos` table has **no `default_branch` column**
+(`full_name, owner, stars, forks, is_fork, language, license, description, created_at,
+pushed_at, metadata_fetched`). Baking in `main` would 404 for every master-default repo, which
+is not hypothetical: `ComposioHQ/awesome-claude-skills` is master-default and contributed zero
+skills for its entire life because `watched_repos.branch` said `main`. Discovering the real
+branch would cost one API call per repo — 282,200 of them.
+
+**`HEAD` resolves server-side.** Verified against that same repo:
+
+| Request | Result |
+|---|---|
+| contents API `?ref=HEAD` | **200** |
+| contents API `?ref=main` | **404** |
+| `github.com/…/tree/HEAD` | **200** |
+| `fetchSkillFromGitHub` on real dataset paths | **works** — name and file list returned |
+
+It is also more durable than a branch name: a repo that renames its default branch keeps
+working, where a stored `main` or `master` silently rots. The dead-link reaper has less to do.
+
+**⚠ The trap this creates, and the order that avoids it.** `scripts/seed.ts` builds
+`tree/{branch}/{dir}`, so the same skill has two spellings depending on which code wrote it. If
+the seeder ran against a HEAD-based registry it would consider every skill new and re-fetch the
+lot — the exact double-count hazard already recorded for phase 8.
+
+The sequence must therefore be:
+
+1. Import writes HEAD-based urls into the freshly built database.
+2. Cut over to that database.
+3. **Only then** switch `seed.ts` to HEAD.
+
+Doing (3) first, against the current registry's 15,767 `tree/main` urls, would orphan all of
+them at once. Once the seeder is on HEAD, `watched_repos.branch` stops being load-bearing for
+url construction — and the tree API accepts `HEAD` too, so the ComposioHQ failure mode
+disappears entirely.
+
+**What would reverse this.** GitHub dropping `HEAD` as a ref alias, which would break far more
+than this registry.
+
+---
+
 ## What this migration loses
 
 Recorded honestly, so none of it is discovered later as a surprise.

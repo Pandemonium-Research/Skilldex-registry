@@ -151,6 +151,10 @@ the truncated preload already fixed in `d375723` — latent rather than absent.
     - [ ] extend `slugifySkillName` with the suffix form, truncating the base to 91 chars
     - [ ] unit-test determinism: the same input twice must produce identical slugs, and the
           result must not depend on row order
+- [x] `source_url` uses `tree/HEAD` (D14) — the dataset carries no default branch, and `main`
+      would 404 for every master-default repo
+- [ ] **After cutover only**, switch `seed.ts` from `tree/{branch}` to `tree/HEAD`. Doing it
+      before would orphan all 15,767 existing urls at once and re-fetch the entire watch list
 - [ ] **Measure tag density** and decide D8's side table with data
 - [ ] **Store `repo` as a real column.** Independent of the naming rule, which rejected
       `owner/repo/name`: phase 5 polls `head_sha` per repo, and the repo is currently only
