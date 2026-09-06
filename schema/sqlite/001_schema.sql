@@ -71,6 +71,10 @@ CREATE UNIQUE INDEX skills_content_key_key ON skills (content_key)
 
 -- Bare-name lookup for CLI builds predating the owner namespace (getSkillByBareName).
 CREATE INDEX skills_name_lookup_idx  ON skills (name);
+-- Prefix lookup for the nightly seeder, which asks "what do I already know about THIS repo?"
+-- with source_url LIKE 'https://github.com/owner/repo/%'. A BINARY-collated btree serves that
+-- prefix scan; without it the seeder would table-scan 1.6M rows once per watched repo.
+CREATE INDEX skills_source_url_idx   ON skills (source_url);
 CREATE INDEX skills_owner_idx        ON skills (owner);
 CREATE INDEX skills_trust_tier_idx   ON skills (trust_tier);
 CREATE INDEX skills_install_count_idx ON skills (install_count DESC);

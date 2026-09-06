@@ -13,22 +13,21 @@
  * Optional:          GITHUB_TOKEN (raises GitHub API rate limit to 5000/hr)
  */
 
-import { createHash } from "node:crypto";
-import { createClient } from "@supabase/supabase-js";
+import { createHash, randomUUID } from "node:crypto";
+import { getDb } from "../src/db/client.js";
+import { likePrefix } from "../src/db/like.js";
 import { fetchSkillFromGitHub } from "../src/github/fetch.js";
 import { validateSkill } from "../src/validator/index.js";
 import { slugifySkillName } from "../src/types/skill.js";
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+if (!process.env.TURSO_DATABASE_URL) {
+  console.error("Missing TURSO_DATABASE_URL");
   process.exit(1);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const db = getDb();
 
 // Delay between GitHub API calls to stay within rate limits.
 // 300ms → ~200 req/min, well within the 5000/hr authenticated limit.
@@ -74,90 +73,87 @@ async function discoverSkillPaths(
     });
 }
 
-/** Page through one column, defeating PostgREST's max-rows cap.
- *  A short page means the end of the table; a full page always implies another request. */
-async function fetchAllColumn(table: string, column: string): Promise<string[]> {
-  const PAGE = 1000;
-  const values: string[] = [];
+) + "%";
+}
 
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await supabase
-      .from(table)
-      .select(column)
-      .range(from, from + PAGE - 1);
-
-    if (error) {
-      // Preloading is an optimisation, not a correctness requirement: failing here costs
-      // GitHub quota, it does not corrupt the run. Say so loudly and carry on.
-      console.error(`Failed to preload ${table}.${column}: ${error.message}`);
-      break;
-    }
-    if (!data || data.length === 0) break;
-
-    // Dynamic table/column names defeat the client's row typing; the shape is known here.
-    values.push(...data.map((row) => (row as unknown as Record<string, string>)[column]));
-    if (data.length < PAGE) break;
+/**
+ * Urls already settled for ONE repo — inserted skills plus urls seen and deliberately skipped.
+ *
+ * This replaces a preload of *every* url in the registry into one in-memory Set. That was
+ * O(corpus) on every run: fine at a few thousand rows, but at 1.6M skills it is thousands of
+ * round trips and roughly a gigabyte of heap, every night, for data that barely changes. The
+ * per-repo form scales with the repo being scanned instead.
+ *
+ * A failure here costs GitHub quota rather than correctness — a url wrongly believed new is
+ * re-fetched and then written as a no-op — so it is reported and the scan continues.
+ */
+async function knownUrlsForRepo(owner: string, repo: string): Promise<Set<string>> {
+  const prefix = likePrefix(`https://github.com/${owner}/${repo}/`);
+  try {
+    const [inserted, seen] = await Promise.all([
+      db.execute({
+        sql: "SELECT source_url AS u FROM skills WHERE source_url LIKE ? ESCAPE '\\'",
+        args: [prefix],
+      }),
+      db.execute({
+        sql: "SELECT url AS u FROM seen_source_urls WHERE url LIKE ? ESCAPE '\\'",
+        args: [prefix],
+      }),
+    ]);
+    return new Set([...inserted.rows, ...seen.rows].map((r) => String(r.u)));
+  } catch (err: any) {
+    console.error(`  Could not load known urls for ${owner}/${repo}: ${err.message}`);
+    return new Set();
   }
+}
 
-  return values;
+/** Stamp a watched repo as scanned, whether or not it produced anything. */
+async function markScanned(id: string): Promise<void> {
+  await db.execute({
+    sql: "UPDATE watched_repos SET last_scanned_at = ? WHERE id = ?",
+    args: [new Date().toISOString(), id],
+  });
 }
 
 async function seed() {
   console.log("Skilldex Registry — skill sync\n");
 
   // 1. Ensure spec version exists
-  const { error: specError } = await supabase.from("spec_versions").upsert(
-    [{ version: "1.0", released_at: "2026-03-26T00:00:00.000Z", is_current: true }],
-    { onConflict: "version" }
-  );
-  if (specError) console.warn("spec_versions upsert:", specError.message);
-  else console.log("✓ spec_versions ready");
+  try {
+    await db.execute({
+      sql: `INSERT INTO spec_versions (version, released_at, is_current) VALUES (?, ?, 1)
+            ON CONFLICT (version) DO UPDATE SET released_at = excluded.released_at`,
+      args: ["1.0", "2026-03-26T00:00:00.000Z"],
+    });
+    console.log("✓ spec_versions ready");
+  } catch (err: any) {
+    console.warn("spec_versions upsert:", err.message);
+  }
 
   // 2. Ensure official publisher exists
-  const { data: publisher, error: pubError } = await supabase
-    .from("publishers")
-    .upsert(
-      [{ github_handle: "skilldex-official", email: null, verified: true }],
-      { onConflict: "github_handle" }
-    )
-    .select("*")
-    .single();
+  const pub = await db.execute({
+    sql: `INSERT INTO publishers (id, github_handle, email, verified) VALUES (?, ?, NULL, 1)
+          ON CONFLICT (github_handle) DO UPDATE SET verified = 1
+          RETURNING *`,
+    args: [randomUUID(), "skilldex-official"],
+  });
 
-  if (pubError || !publisher) {
-    console.error("Failed to ensure publisher:", pubError?.message);
+  if (pub.rows.length === 0) {
+    console.error("Failed to ensure publisher");
     return;
   }
+  const publisher = { id: String(pub.rows[0].id), github_handle: String(pub.rows[0].github_handle) };
   console.log(`✓ Publisher ready: ${publisher.github_handle}\n`);
 
   // 3. Load watched repos from DB (single source of truth)
-  const { data: watchedRepos, error: reposError } = await supabase
-    .from("watched_repos")
-    .select("*")
-    .eq("enabled", true)
-    .order("added_at");
-
-  if (reposError || !watchedRepos) {
-    console.error("Failed to load watched_repos:", reposError?.message);
-    return;
-  }
+  const reposResult = await db.execute(
+    "SELECT * FROM watched_repos WHERE enabled = 1 ORDER BY added_at"
+  );
+  const watchedRepos = reposResult.rows;
   console.log(`Loaded ${watchedRepos.length} watched repos from DB`);
 
-  // 4. Pre-load all existing source_urls to avoid redundant GitHub API calls.
-  //    Includes skills already inserted AND urls previously seen but skipped
-  //    due to name conflicts — prevents re-fetching them every run.
-  //
-  //    This MUST paginate. An unranged select is capped by PostgREST's max-rows, which
-  //    silently truncates the set: everything above the cap looks new, is re-fetched from
-  //    GitHub on every run, and inflates every "N new" figure the run reports. Writes stay
-  //    no-ops under ignoreDuplicates, so the only symptoms are wasted API quota and
-  //    misleading counts — which is why it went unnoticed.
-  const [existingSourceUrls, seenSourceUrls] = await Promise.all([
-    fetchAllColumn("skills", "source_url"),
-    fetchAllColumn("seen_source_urls", "url"),
-  ]);
-
-  const existingUrls = new Set([...existingSourceUrls, ...seenSourceUrls]);
-  console.log(`${existingUrls.size} skills already in registry\n`);
+  // 4. Known urls are loaded per repo, inside the loop below — see knownUrlsForRepo.
+  //    There is deliberately no global preload any more.
 
   /**
    * Record a url this run has settled, so no future run fetches it again.
@@ -167,11 +163,12 @@ async function seed() {
    * rate limit, a database error — must never be recorded, or one bad night would drop a
    * real skill from the registry permanently.
    */
-  const markSeen = async (url: string) => {
-    await supabase
-      .from("seen_source_urls")
-      .upsert([{ url }], { onConflict: "url", ignoreDuplicates: true });
-    existingUrls.add(url); // keep the local set in step so this run skips it too
+  const markSeen = async (url: string, known: Set<string>) => {
+    await db.execute({
+      sql: "INSERT OR IGNORE INTO seen_source_urls (url) VALUES (?)",
+      args: [url],
+    });
+    known.add(url); // keep the local set in step so this run skips it too
   };
 
   // 5. Process each repo
@@ -180,22 +177,34 @@ async function seed() {
   let totalFailed = 0;
 
   for (const watched of watchedRepos) {
-    const { owner, repo, branch, trust_tier, tags } = watched;
+    const owner = String(watched.owner);
+    const repo = String(watched.repo);
+    const branch = watched.branch == null ? "main" : String(watched.branch);
+    const trust_tier = String(watched.trust_tier);
+    const tags: string[] = (() => {
+      try {
+        const t = watched.tags == null ? [] : JSON.parse(String(watched.tags));
+        return Array.isArray(t) ? t : [];
+      } catch {
+        return [];
+      }
+    })();
+    const watchedId = String(watched.id);
+
     console.log(`Scanning ${owner}/${repo} [${trust_tier}]...`);
 
-    const allPaths = await discoverSkillPaths(owner, repo, branch ?? "main");
-    const newPaths = allPaths.filter((p) => !existingUrls.has(p));
+    // Scoped to this repo, not the whole registry — see knownUrlsForRepo.
+    const known = await knownUrlsForRepo(owner, repo);
+    const allPaths = await discoverSkillPaths(owner, repo, branch);
+    const newPaths = allPaths.filter((p) => !known.has(p));
 
     console.log(
-      `  ${allPaths.length} skills found, ${newPaths.length} new`
+      `  ${allPaths.length} skills found, ${newPaths.length} new (${known.size} already known here)`
     );
 
     if (newPaths.length === 0) {
       // Update last_scanned_at even when nothing is new
-      await supabase
-        .from("watched_repos")
-        .update({ last_scanned_at: new Date().toISOString() })
-        .eq("id", watched.id);
+      await markScanned(watchedId);
       totalSkipped += allPaths.length;
       continue;
     }
@@ -209,7 +218,7 @@ async function seed() {
         if (!metadata.name) {
           console.log(`  ✗ Skipped (no name): ${sourceUrl}`);
           totalFailed++;
-          await markSeen(sourceUrl); // frontmatter parsed and has no name; it will not grow one
+          await markSeen(sourceUrl, known); // parsed, and has no name; it will not grow one
           continue;
         }
 
@@ -227,39 +236,37 @@ async function seed() {
           createHash("sha256").update(sourceUrl).digest("hex")
         );
 
-        const { data: inserted, error } = await supabase
-          .from("skills")
-          .upsert(
-            [
-              {
-                name: slug,
-                display_name: metadata.name,
-                owner,
-                description: metadata.description || metadata.name,
-                author: owner,
-                source_url: sourceUrl,
-                trust_tier,
-                score: validation.score,
-                spec_version: metadata.spec_version ?? "1.0",
-                tags: [...(tags ?? []), ...((metadata as any).tags ?? [])],
-                published_by: publisher.id,
-              },
-            ],
-            { onConflict: "owner,name", ignoreDuplicates: true }
-          )
-          .select("name");
+        const inserted = await db.execute({
+          sql: `INSERT INTO skills
+                  (id, name, display_name, owner, description, author, source_url,
+                   trust_tier, score, spec_version, tags, published_by)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT (owner, name) DO NOTHING
+                RETURNING name`,
+          args: [
+            randomUUID(),
+            slug,
+            metadata.name,
+            owner,
+            metadata.description || metadata.name,
+            owner,
+            sourceUrl,
+            trust_tier,
+            validation.score,
+            metadata.spec_version ?? "1.0",
+            JSON.stringify([...tags, ...((metadata as any).tags ?? [])]),
+            publisher.id,
+          ],
+        });
 
-        if (error) {
-          console.log(`  ✗ ${metadata.name}: ${error.message}`);
-          totalFailed++;
-        } else if (!inserted || inserted.length === 0) {
+        if (inserted.rows.length === 0) {
           console.log(`  ~ ${metadata.name} (name conflict, skipped)`);
           totalSkipped++;
-          await markSeen(sourceUrl);
+          await markSeen(sourceUrl, known);
         } else {
           console.log(`  ✓ ${metadata.name} (score: ${validation.score})`);
           totalInserted++;
-          existingUrls.add(sourceUrl); // keep local set in sync
+          known.add(sourceUrl); // keep local set in sync
         }
       } catch (err: any) {
         console.log(`  ✗ ${sourceUrl}: ${err.message}`);
@@ -267,15 +274,12 @@ async function seed() {
         // PARSE_FAILED is a property of the file, not of this run: the same SKILL.md
         // parses the same way tomorrow. Every other error (FETCH_FAILED, aborts, 5xx)
         // may well succeed next time, so those are deliberately left to be retried.
-        if (err?.code === "PARSE_FAILED") await markSeen(sourceUrl);
+        if (err?.code === "PARSE_FAILED") await markSeen(sourceUrl, known);
       }
     }
 
     // Mark repo as scanned
-    await supabase
-      .from("watched_repos")
-      .update({ last_scanned_at: new Date().toISOString() })
-      .eq("id", watched.id);
+    await markScanned(watchedId);
   }
 
   console.log(

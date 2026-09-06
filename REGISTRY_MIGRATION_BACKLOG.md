@@ -19,7 +19,7 @@ Effort figures are estimates, not commitments.
 | **0** | Provision Turso, verify connectivity | 0.5d | ✅ done |
 | **1** | Schema + migrate live rows + parity check | 1d | ✅ done |
 | **2** | Rewrite `src/db/*`; replace Supabase Auth | 2–3d | ✅ **done and deployed** |
-| **3** | Port `seed.ts` to Turso **and** kill the global preload | 1d | 🔨 in progress |
+| **3** | Port `seed.ts` to Turso **and** kill the global preload | 1d | ✅ done |
 | **4** | Import the corpus | 2d | ⬜ |
 | **5** | Freshness #1+2 — repo SHA polling, compare diffs | 1.5d | ⬜ |
 | **6** | Freshness #4+5 — verify-on-read, priority queue | 1d | ⬜ |
@@ -94,7 +94,16 @@ That file's `INSERT` is stale: it lists four repos on `main`, but production now
 
 ## Phase 3 — Kill the global preload
 
-- [ ] Replace `fetchAllColumn` in `scripts/seed.ts` with a per-repo anti-join
+- [x] Replace `fetchAllColumn` in `scripts/seed.ts` with a per-repo scoped query
+- [x] Port `seed.ts` off `@supabase/supabase-js` — absorbed from phase 8, because fixing the
+      preload against PostgREST would have been throwaway work and the API is now on Turso
+- [x] `skills_source_url_idx` added so the prefix scan uses an index instead of a table scan
+- [x] `.github/workflows/nightly-seed.yml` passes `TURSO_*` instead of `SUPABASE_*`
+- [x] Verified against live data: per-repo scoping accounts for 15,762 of 15,767 known urls.
+      The 5 remaining belong to `PhilipStark/book-genesis`, which was repointed today and is
+      no longer watched, so they can never be rediscovered
+- [ ] **Not yet run.** The seeder has not been executed against Turso; the nightly workflow is
+      disabled. First run should be manual and watched
 
 **Why this is before the import.** Today the seeder loads *every* known URL into an in-memory
 `Set` on every run. At 1.61M skills plus seen URLs that is ~3,200 paginated round trips and

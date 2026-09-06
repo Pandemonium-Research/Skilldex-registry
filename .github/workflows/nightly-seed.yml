@@ -24,8 +24,8 @@ jobs:
       - name: Run skill sync
         run: npm run seed:ci
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           # GITHUB_TOKEN is provided automatically by Actions.
           # It covers public repo reads at 1000 req/hr.
           # If rate limits become an issue, create a PAT and store it
