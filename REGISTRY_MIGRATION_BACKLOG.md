@@ -18,7 +18,7 @@ Effort figures are estimates, not commitments.
 |---|---|---:|---|
 | **0** | Provision Turso, verify connectivity | 0.5d | ✅ done |
 | **1** | Schema + migrate live rows + parity check | 1d | ✅ done |
-| **2** | Rewrite `src/db/*`; replace Supabase Auth | 2–3d | ⬜ |
+| **2** | Rewrite `src/db/*`; replace Supabase Auth | 2–3d | ✅ code done — **deploy held** until phase 8 |
 | **3** | Freshness #3 — kill the global preload | 0.5d | ⬜ |
 | **4** | Import the corpus | 2d | ⬜ |
 | **5** | Freshness #1+2 — repo SHA polling, compare diffs | 1.5d | ⬜ |
