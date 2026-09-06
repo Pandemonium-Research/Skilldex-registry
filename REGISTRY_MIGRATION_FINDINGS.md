@@ -682,3 +682,47 @@ Two things to carry forward:
 
 The category strips still work unscoped, because rows carrying signal sort to the top on their
 own — which is also why the original scoping bought nothing that mattered.
+
+---
+
+## 10. Deployment verification, 2026-09-06 (after both redeploys)
+
+Everything below was checked against the deployed API and site, not against a local build.
+
+### The cache fix landed
+
+| Route | `x-vercel-cache` |
+|---|---|
+| `/v1/skills?limit=1` | **HIT** |
+| `/v1/stats` | **HIT** |
+| `/v1/tags` | **HIT** |
+
+Before the fix these were a persistent `MISS` while `/v1/skills/:owner/:name` was already
+`HIT` — the discrepancy that exposed the post-`next()` middleware problem in §7. Note again
+that `cache-control` in the response is not the signal: Vercel consumes `s-maxage` and rewrites
+what it sends the browser to `public, max-age=0`.
+
+### The provenance filter is no longer defaulted
+
+| Request | `total` |
+|---|---|
+| `/v1/skills` | 4,863 |
+| `/v1/skills?source=seeded` | 4,863 |
+| `/v1/skills?source=imported` | **0** |
+
+Identical for the first two because the live database is entirely seeded — the corpus is not
+cut over. `source=imported` returning 0 is the positive check that the filter is applied rather
+than ignored, and an invalid value returns `INVALID_PARAMS` with the offending path.
+
+The same request before the correction returned 4,863 whether or not the corpus was present,
+because the filter defaulted on.
+
+### The site
+
+`/registry` returns 200, renders all four category strips (Official, Most installed, Recently
+added, Browse by tag), and draws its headline from `/v1/stats` rather than from a count.
+
+### Migrations applied to the live database
+
+`001` recorded as already-in-effect, `002` (source, stats, tags) and `003` (delistings) applied.
+`npm run delist -- list` reports no delistings, which is the expected starting state.
