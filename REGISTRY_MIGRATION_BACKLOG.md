@@ -112,8 +112,18 @@ the truncated preload already fixed in `d375723` — latent rather than absent.
       recoverable by string-parsing `source_url`. That fragility is how the stale-owner
       problem on the renamed repos arose
 - [ ] Build FTS5 by `'rebuild'` *after* the bulk load, then create the triggers
-- [ ] `turso db create --from-file` — watch the **2 GB ceiling**; `--from-dump` is the
-      fallback
+- [ ] **Build into a fresh local file, then upload — blue/green.** `turso db create
+      --from-file` *creates* a database; it cannot merge into the one already holding the
+      live rows, so an upload on top would replace them. The order is: migrate the live rows
+      into the build file **first** (D13's incumbency rule needs them present), add the
+      corpus, then `turso db create skilldex-registry-v2 --from-file` and switch
+      `TURSO_DATABASE_URL`. Cutover is one variable and the old database stays for rollback.
+      `@libsql/client` accepts `file:` URLs, so `migrate-to-turso.ts` can target the build
+      file with no change beyond the URL
+- [ ] Watch the **2 GB `--from-file` ceiling**; `--from-dump` is the fallback
+- [ ] Rejected alternative: inserting 1.6M rows into the live database. It fits the write
+      budget (16% of 10M/month) but is 3,200+ round trips and non-atomic — a failure leaves a
+      half-imported registry
 - [ ] Re-verify the deployed API against the new database
 
 ---
