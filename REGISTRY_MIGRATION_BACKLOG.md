@@ -26,6 +26,7 @@ Effort figures are estimates, not commitments.
 | **6** | Freshness #4+5 — verify-on-read, priority queue | 1d | ⬜ |
 | **7** | Opt-out / takedown path | 1d | ✅ **done** — was the gate on the corpus going live |
 | **8** | Realign the nightly seeder with the imported corpus | 1–1.5d | ⬜ |
+| **9** | Free-text search latency at corpus scale | 1d | ⬜ **after cutover** |
 
 ---
 
@@ -143,8 +144,8 @@ the truncated preload already fixed in `d375723` — latent rather than absent.
       old database for rollback
 - [ ] **Then** switch `seed.ts` to `tree/HEAD` (D14) — never before
 
-⚠ Free-text search is now the slowest path at ~2–4s (`q=pdf` 3,840ms). Workable and cacheable,
-but it is the one number a user would still feel, and the obvious next target.
+⚠ Free-text search is now the slowest path — see phase 9, deliberately deferred until after
+cutover.
 
 
 - [ ] `scripts/build-corpus.ts` — DuckDB over the Parquet mirror → one local SQLite file
@@ -348,6 +349,51 @@ assumptions stop holding.
 
 **Do not skip the source_url check.** It is the single most likely way to silently double-count
 the corpus.
+
+---
+
+## Phase 9 — Free-text search latency
+
+**Deliberately after cutover.** Search works and is cacheable; tuning it against a database
+nothing points at would be optimising in the dark, and the real access pattern is unknown until
+the corpus is live. Measure what people actually search for first.
+
+Measured on 1,615,322 rows (FINDINGS §11), warm:
+
+| Query | Time | Matches |
+|---|---|---|
+| `q=react hooks` | 1,960ms | 4,261 |
+| `q=kubernetes` | 3,776ms | 6,819 |
+| `q=pdf` | 3,840ms | 10,000+ |
+
+Everything else in the registry is now 200–400ms, so this is the one number a user would feel.
+
+### What is actually costing the time
+
+Not the FTS index lookup. `bm25()` is an auxiliary function evaluated per matched row, and
+FTS5 has no block-max WAND or MaxScore, so `ORDER BY bm25(...)` materialises and scores **every**
+match before applying `LIMIT 20`. Cost scales with match count, not with result count — which is
+why `q=pdf` (10k+ matches) is slower than `q=react hooks` (4.2k).
+
+- [ ] **Confirm the diagnosis before optimising.** Time the FTS subquery alone against the same
+      query with `ORDER BY rowid` instead of bm25. If the gap is small, the cost is the rowid
+      lookups into a 1.9 GB table and the fix is different
+- [ ] **Cache aggressively first.** These are GETs behind `s-maxage=60`; a popular query costs
+      the full price once a minute. Check real hit rates before writing any SQL — this may be
+      the whole answer
+- [ ] **Cap what gets ranked.** Score the first N matches by rowid rather than all of them.
+      Changes results for broad queries, so it needs a judgement call on where N sits
+- [ ] **Consider a `rank` materialised at import time** — a static quality prior (score,
+      install_count, description length) to order by when a query matches more than N rows.
+      Cheap to compute in `build.ts`, and it makes broad queries a top-k index walk
+- [ ] **Do NOT reach for a composite index.** FINDINGS §5 records one already rejected on
+      measurement; the 2 GB `--from-file` ceiling still binds and 001 already cut 192 MB
+
+### Also deferred here
+
+- [ ] **`skills_trgm` is built, integrity-checked, and queried by nothing.** Substring and
+      typo-tolerant matching exists in the database and is unreachable over HTTP. Wiring it up
+      is a feature, not a fix, but it belongs with this work
 
 ---
 
