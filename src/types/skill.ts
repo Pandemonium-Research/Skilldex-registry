@@ -51,7 +51,10 @@ export const searchSkillsSchema = z.object({
   min_score: z.coerce.number().int().min(0).max(100).optional(),
   spec_version: z.string().optional(),
   tags: z.string().optional(), // comma-separated
-  sort: z.enum(["installs", "score", "recent", "name"]).default("installs"),
+  // No static default: the effective sort depends on whether `q` is present, and that
+  // cannot be expressed here. Resolved in the db layer — a text search defaults to
+  // relevance, a browse defaults to installs.
+  sort: z.enum(["relevance", "installs", "score", "recent", "name"]).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),
 });

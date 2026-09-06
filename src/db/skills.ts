@@ -13,11 +13,30 @@ import type { InArgs } from "@libsql/client";
  * stops being theoretical.
  */
 const SORT_MAP: Record<string, string> = {
+  // bm25 returns negative scores, best first, so ASC is most-relevant-first.
+  relevance: "m.rank ASC, s.seq ASC",
   installs: "s.install_count DESC, s.seq ASC",
   score: "s.score DESC, s.seq ASC",
   recent: "s.published_at DESC, s.seq ASC",
   name: "s.name ASC, s.seq ASC",
 };
+
+/**
+ * Which ordering applies when the caller did not ask for one.
+ *
+ * A text search sorted by popularity is not a search — it answers "what is popular among
+ * things that matched" rather than "what matches best". The Postgres path did exactly that:
+ * it narrowed with textSearch and then ordered by install_count, so relevance never entered
+ * the ordering. With install_count zero across an imported corpus it degenerates completely.
+ *
+ * `relevance` is only meaningful when the FTS table is joined, so it is not reachable without
+ * a query — asking for it explicitly without `q` falls back to `installs`.
+ */
+export function resolveSort(requested: string | undefined, hasQuery: boolean): string {
+  if (requested && requested !== "relevance") return requested;
+  if (hasQuery) return "relevance";
+  return "installs";
+}
 
 /**
  * Turn free user text into an FTS5 MATCH expression.
@@ -52,9 +71,14 @@ export async function searchSkills(
   let from = "skills s";
   const fts = params.q ? toFtsQuery(params.q) : null;
   if (fts) {
-    from = "skills s JOIN skills_fts f ON f.rowid = s.seq";
-    where.push("skills_fts MATCH ?");
-    args.push(fts);
+    // The rank is computed inside an FTS-only subquery. bm25() is an FTS5 auxiliary function
+    // and is rejected ("unable to use function bm25 in the requested context") when the outer
+    // query also carries a window function, so it cannot simply be joined and sorted on.
+    // `m` is then an ordinary relation the outer query can filter, count and order freely.
+    from =
+      "skills s JOIN (SELECT rowid AS seq, bm25(skills_fts) AS rank" +
+      " FROM skills_fts WHERE skills_fts MATCH ?) m ON m.seq = s.seq";
+    args.push(fts); // bound first: it sits in FROM, ahead of every WHERE placeholder
   }
 
   if (params.tier) {
@@ -87,7 +111,7 @@ export async function searchSkills(
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const orderSql = SORT_MAP[params.sort] ?? SORT_MAP.installs;
+  const orderSql = SORT_MAP[resolveSort(params.sort, Boolean(fts))] ?? SORT_MAP.installs;
 
   // count(*) OVER () returns the unpaginated total alongside the page, so the whole search
   // is one round trip rather than a query plus a count.

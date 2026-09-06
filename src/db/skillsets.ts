@@ -1,12 +1,13 @@
 import { getDb } from "./client.js";
 import { toSkillsetRow, jsonOrNull } from "./rows.js";
-import { toFtsQuery } from "./skills.js";
+import { toFtsQuery, resolveSort } from "./skills.js";
 import type { SkillsetRow } from "../types/skillset.js";
 import type { SearchSkillsetsQuery } from "../types/skillset.js";
 import type { InArgs } from "@libsql/client";
 
 /** `seq` breaks ties so LIMIT/OFFSET paging is stable — see the note in skills.ts. */
 const SORT_MAP: Record<string, string> = {
+  relevance: "m.rank ASC, s.seq ASC",
   installs: "s.install_count DESC, s.seq ASC",
   score: "s.score DESC, s.seq ASC",
   recent: "s.published_at DESC, s.seq ASC",
@@ -23,9 +24,14 @@ export async function searchSkillsets(
   let from = "skillsets s";
   const fts = params.q ? toFtsQuery(params.q) : null;
   if (fts) {
-    from = "skillsets s JOIN skillsets_fts f ON f.rowid = s.seq";
-    where.push("skillsets_fts MATCH ?");
-    args.push(fts);
+    // The rank is computed inside an FTS-only subquery. bm25() is an FTS5 auxiliary function
+    // and is rejected ("unable to use function bm25 in the requested context") when the outer
+    // query also carries a window function, so it cannot simply be joined and sorted on.
+    // `m` is then an ordinary relation the outer query can filter, count and order freely.
+    from =
+      "skillsets s JOIN (SELECT rowid AS seq, bm25(skillsets_fts) AS rank" +
+      " FROM skillsets_fts WHERE skillsets_fts MATCH ?) m ON m.seq = s.seq";
+    args.push(fts); // bound first: it sits in FROM, ahead of every WHERE placeholder
   }
 
   if (params.tier) {
@@ -56,7 +62,7 @@ export async function searchSkillsets(
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const orderSql = SORT_MAP[params.sort] ?? SORT_MAP.installs;
+  const orderSql = SORT_MAP[resolveSort(params.sort, Boolean(fts))] ?? SORT_MAP.installs;
 
   const result = await db.execute({
     sql: `SELECT s.*, count(*) OVER () AS __total

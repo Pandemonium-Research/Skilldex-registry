@@ -31,6 +31,7 @@ const PATHS = [
   "/skills?tags=official&limit=10",
   "/skills?q=pdf&limit=5",
   "/skills?q=kubernetes&limit=5",
+  "/skills?q=pdf&limit=5&sort=installs",
   "/skills/anthropics/pdf",
   "/skills/anthropics/does-not-exist",
   "/skills/agent-memory",          // ambiguous — 3 owners
@@ -48,9 +49,12 @@ const PATHS = [
  */
 const EXPECTED_DIFF: Record<string, string> = {
   "/skills?q=pdf&limit=5":
-    "search now matches descriptions, not just names — the Postgres path never did, despite " +
-    "textSearch(\"name, description\") and a GIN index over both",
-  "/skills?q=kubernetes&limit=5": "same: description matches are new and intended",
+    "two intended changes: search matches descriptions (the Postgres path never did, despite " +
+    "textSearch(\"name, description\") and a GIN index over both), and a text search now " +
+    "orders by bm25 relevance instead of install_count",
+  "/skills?q=kubernetes&limit=5": "same: description matches plus relevance ordering",
+  "/skills?q=pdf&limit=5&sort=installs":
+    "descriptions matched; ordering pinned to the old install_count behaviour on request",
 };
 
 /** Same set, different order among ties — the new layer adds a deterministic tiebreaker. */

@@ -188,6 +188,28 @@ buries the 4,838 real skills under 1.6M ties in arbitrary order. `score` is a li
 recomputable number that exists for every row, and `?sort=score` already worked — only the
 default changes.
 
+**Revision, 2026-09-06 — a text search now defaults to relevance, not popularity.**
+
+`sort` no longer carries a static default. The effective ordering is resolved where the query
+is built: **`q` present → `relevance` (bm25); no `q` → `installs`.** An explicit `sort` always
+wins, so the old behaviour stays reachable as `?q=…&sort=installs`.
+
+The Postgres path narrowed with `textSearch` and then ordered by `install_count`, so relevance
+never entered the ordering at all — it answered "what is popular among things that matched"
+rather than "what matches best". Visible on live data: `q=pdf` returned `anthropics/pdf` and
+then `dsh-deepread`, `papers-skill`, `puppeteer-skill`, which only mention PDFs in passing.
+Ordered by bm25 it returns `pdf-analyzer`, `pdf-merge-split`, `anthropics/pdf`, `ComposioHQ/pdf`,
+`minimax-pdf`.
+
+At 1.6M imported rows `install_count` is zero almost everywhere, so popularity ordering would
+have degenerated into an arbitrary tiebreak.
+
+**Implementation note.** bm25 is computed in an FTS-only subquery rather than joined and sorted
+on directly: it is an FTS5 auxiliary function and SQLite rejects it — *"unable to use function
+bm25 in the requested context"* — when the outer query also carries the `count(*) OVER ()` that
+returns the unpaginated total. `relevance` is unreachable without a query and falls back to
+`installs` if asked for anyway.
+
 **What would reverse this.** Real install telemetry at a volume that makes popularity
 meaningful across the corpus.
 
