@@ -1,7 +1,7 @@
 {
   "name": "skilldex-registry",
   "version": "1.0.0",
-  "description": "Backend API and metadata store for Skilldex \u2014 indexes .skill packages, serves metadata, handles search, manages trust tiers",
+  "description": "Backend API and metadata store for Skilldex — indexes .skill packages, serves metadata, handles search, manages trust tiers",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
@@ -30,6 +30,7 @@
     "zod": "^3.24.3"
   },
   "devDependencies": {
+    "@duckdb/node-api": "^1.5.5-r.4",
     "@types/node": "^22.14.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.3",
