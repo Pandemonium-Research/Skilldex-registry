@@ -2,7 +2,8 @@
 
 Task tracking for the move off Supabase/Postgres to Turso/SQLite and the full GitSkills
 import. Rationale for every design call is in
-[REGISTRY_MIGRATION_DECISIONS.md](REGISTRY_MIGRATION_DECISIONS.md).
+[REGISTRY_MIGRATION_DECISIONS.md](REGISTRY_MIGRATION_DECISIONS.md); the measurements behind
+them are in [REGISTRY_MIGRATION_FINDINGS.md](REGISTRY_MIGRATION_FINDINGS.md).
 
 Phase 3 deliberately precedes phase 4: it is what makes the import survivable rather than
 something to clean up afterwards.
@@ -23,6 +24,7 @@ Effort figures are estimates, not commitments.
 | **5** | Freshness #1+2 — repo SHA polling, compare diffs | 1.5d | ⬜ |
 | **6** | Freshness #4+5 — verify-on-read, priority queue | 1d | ⬜ |
 | **7** | Opt-out / takedown path | 1d | ⬜ |
+| **8** | Realign the nightly seeder with the imported corpus | 1–1.5d | ⬜ |
 
 ---
 
@@ -92,11 +94,23 @@ the truncated preload already fixed in `d375723` — latent rather than absent.
       (1,877,981 → 1,610,957). Both are required by the Agent Skills spec and already
       enforced by `seed.ts`
 - [ ] Backfill `score` with `validateSkill` — CPU only, no network
-- [ ] **Collision rule.** 005 cut bare-name collisions from 41.5% to 2.7%, but 2.7% of 1.61M
-      is **~43,000 rows** that still collide on `(owner, name)` with different content.
-      `ON CONFLICT DO NOTHING` would drop them silently — the exact failure 005 exists to
-      prevent. Build on `slugifySkillName`'s hash-suffix fallback
+- [ ] **Collision rule — settled, see D13.** Measured: **204,923 rows (12.75%)** collide on
+      `(owner, slug)`, not the ~43,000 previously assumed from 005's header. Implement the
+      three cases:
+    - [ ] uncontested → bare `owner/name`
+    - [ ] contested, one shared description → lowest `file_sha` keeps the bare name, rest get
+          `owner/name-<hash8>`
+    - [ ] contested, descriptions differ → all get `owner/name-<hash8>`; bare name reports
+          ambiguity
+    - [ ] existing rows (`content_key IS NULL`) are never displaced
+    - [ ] extend `slugifySkillName` with the suffix form, truncating the base to 91 chars
+    - [ ] unit-test determinism: the same input twice must produce identical slugs, and the
+          result must not depend on row order
 - [ ] **Measure tag density** and decide D8's side table with data
+- [ ] **Store `repo` as a real column.** Independent of the naming rule, which rejected
+      `owner/repo/name`: phase 5 polls `head_sha` per repo, and the repo is currently only
+      recoverable by string-parsing `source_url`. That fragility is how the stale-owner
+      problem on the renamed repos arose
 - [ ] Build FTS5 by `'rebuild'` *after* the bulk load, then create the triggers
 - [ ] `turso db create --from-file` — watch the **2 GB ceiling**; `--from-dump` is the
       fallback
@@ -138,6 +152,34 @@ the truncated preload already fixed in `d375723` — latent rather than absent.
 searchable. The corpus spans accounts that never opted in, and importing the full set rather
 than the ≥ 2-owner slice widens that from 23,081 owners to every account in the dataset.
 Freshness and consent are separate gates on the same milestone.
+
+---
+
+## Phase 8 — Realign the nightly seeder
+
+**Runs after the import, not before.** Until the corpus lands, the seeder's world is 17
+watched repos; afterwards it is 17 repos inside a 1.6M-row registry, and several of its
+assumptions stop holding.
+
+- [ ] Port `scripts/seed.ts` off `supabase-js` — phase 2 covers `src/db/*`, but the seeder
+      talks to the database directly and is not included in that
+- [ ] **Apply the same D13 naming rule.** The seeder currently calls `slugifySkillName` with a
+      *source-url* hash as its fallback key; the importer uses the *content* hash. If the two
+      disagree, a nightly run can insert a second row for a skill the import already has
+- [ ] **Reconcile `source_url` construction.** The seeder builds
+      `https://github.com/{owner}/{repo}/tree/{branch}/{dir}`; the importer derives its URL
+      from `repo_full_name` + `path`. **If these differ by even a trailing slash or a branch
+      name, every already-imported skill in the 17 watched repos looks new and gets
+      re-inserted.** Verify byte-equality on a sample before the first nightly run after
+      import
+- [ ] Decide what happens when a watched repo's skill is already present with a `content_key`:
+      update in place, or leave the imported row alone
+- [ ] Re-check `markSeen` semantics at scale — deterministic failures recorded, transient ones
+      retried (already correct, but the volume changes)
+- [ ] Confirm the phase 3 anti-join still bounds the run once the table is 1.6M rows
+
+**Do not skip the source_url check.** It is the single most likely way to silently double-count
+the corpus.
 
 ---
 

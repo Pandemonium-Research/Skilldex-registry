@@ -238,6 +238,56 @@ unreliable.
 
 ---
 
+## D13 — Name collisions resolved by content hash, in three cases
+
+**Decision.** The importer assigns names by this rule. Measurements behind it are in
+[REGISTRY_MIGRATION_FINDINGS.md](REGISTRY_MIGRATION_FINDINGS.md) §2.
+
+| Case | Rule |
+|---|---|
+| **Uncontested** — one distinct content for `(owner, slug)` (~1.40M groups) | bare `owner/name` |
+| **Contested, all contents share one description** (42,794 groups) | lowest `file_sha` keeps `owner/name`; the rest become `owner/name-<hash8>` |
+| **Contested, descriptions differ** (31,806 groups) | **nobody** keeps the bare name; all become `owner/name-<hash8>`, and bare `owner/name` reports ambiguity |
+| **Existing hand-published rows** (`content_key IS NULL`) | always keep their bare name; an import can never displace one |
+
+`<hash8>` is the first 8 hex characters of `content_key`, which is the dataset's `file_sha`.
+
+**Why a hash at all.** 204,923 rows — **12.75% of the corpus** — collide on `(owner, slug)`.
+`ON CONFLICT DO NOTHING` would drop them silently, which is exactly the failure migration 005
+exists to prevent, only larger.
+
+**Why not `owner/repo/name`.** Measured: it resolves **28.1%** and leaves 147,249 rows still
+contested, because **53,305 of the 81,238 contested groups are confined to a single repo**. It
+would be a breaking addressing change — one the CLI has not even caught up to from 005 — for
+less than a third of the problem. Rejected on evidence, not taste.
+
+**Why three cases rather than one.** Because the corpus splits cleanly: **52.7% of contested
+groups share a single description** (the same skill regenerated — `Klotzkette` and
+`David-Li0406` alone account for groups of 88–115) while **39.2% have a distinct description
+per content** (genuinely different skills that happen to share a generic name, like the two
+verified `run` skills in `alirezarezvani/claude-skills`). An arbitrary canonical is *harmless*
+for the first group and *actively misleading* for the second. One uniform rule would have to
+pick which of those two costs to pay everywhere.
+
+**Why "descriptions differ" reports ambiguity rather than picking a winner.** `getSkillByBareName`
+already made this call for bare names across owners, and its comment says why: *"silently
+resolving to whichever row came back first is how you ship a skill nobody asked for."* D13
+applies the same principle one level down.
+
+**Why the canonical is `file_sha`, not score or insert order.** It has to be deterministic and
+stable across re-imports, or a rebuild silently reassigns `owner/name` and installed URLs
+break. Insert order is not stable. **Score is not stable either** — the scoring function
+changed on 2026-09-06 (`7db9620`), and any future change would reshuffle canonicals. `file_sha`
+is a property of the bytes and never moves.
+
+**Sizing.** The largest contested group is **115** contents, so 8 hex characters is ample and
+the 100-character slug cap is never threatened (the base is truncated to 91 before the suffix).
+
+**What would reverse this.** Nothing cheaply — this becomes a URL contract, and changing it
+later renames skills people have installed. If it must change, it needs a redirect table.
+
+---
+
 ## What this migration loses
 
 Recorded honestly, so none of it is discovered later as a surprise.

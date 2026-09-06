@@ -9,7 +9,10 @@ far and what comes next.
 
 ## Result ordering after a bulk import
 
-**Status:** unresolved, and it lands the moment the import does.
+**Status:** ~~unresolved~~ **decided 2026-09-06** — the default sort becomes `score`
+(REGISTRY_MIGRATION_DECISIONS.md D10). At full-corpus scale the hand-published skills are
+0.3% of the table, so leaving `installs` as the default would bury them under 1.6M ties. The
+analysis below is why `score` was the available answer.
 
 **The problem.** [`src/db/skills.ts`](src/db/skills.ts) narrows with `textSearch` then
 orders by `install_count`, which defaults to `installs` in `searchSkillsSchema`. Every
@@ -51,7 +54,21 @@ searchable.
 
 ## Full-corpus import (beyond ≥ 2 owners)
 
-**Status:** deferred. The initial import lists only entries appearing under **≥ 2
+> **Superseded 2026-09-06.** Pranav decided to import the **whole** corpus, not the ≥ 2-owner
+> slice. See [REGISTRY_MIGRATION_DECISIONS.md](REGISTRY_MIGRATION_DECISIONS.md) and
+> [REGISTRY_MIGRATION_BACKLOG.md](REGISTRY_MIGRATION_BACKLOG.md). The storage objection below
+> was answered by moving off Supabase to Turso (D1); the *signal* objection stands and is now
+> handled by making `score` the default sort (D10). The section is kept because its reasoning
+> is still the record of why the threshold was proposed.
+>
+> One consequence measured after that decision: name collisions are **204,923 rows (12.75%)**
+> across the full corpus, not the 2.7% quoted from 005's header — see
+> [REGISTRY_MIGRATION_FINDINGS.md](REGISTRY_MIGRATION_FINDINGS.md) §2. Importing everything
+> rather than the slice is what multiplied it, and D13 is the rule that handles it.
+
+**Status:** ~~deferred~~ **adopted**. The original entry follows.
+
+The initial import was to list only entries appearing under **≥ 2
 distinct owners** — 215,504 of 1,610,957 candidates.
 
 **Goal:** List the remaining 1,395,453 single-owner entries.
