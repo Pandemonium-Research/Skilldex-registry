@@ -73,9 +73,6 @@ async function discoverSkillPaths(
     });
 }
 
-) + "%";
-}
-
 /**
  * Urls already settled for ONE repo — inserted skills plus urls seen and deliberately skipped.
  *

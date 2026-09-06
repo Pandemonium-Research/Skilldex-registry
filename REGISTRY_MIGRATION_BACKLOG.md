@@ -102,8 +102,18 @@ That file's `INSERT` is stale: it lists four repos on `main`, but production now
 - [x] Verified against live data: per-repo scoping accounts for 15,762 of 15,767 known urls.
       The 5 remaining belong to `PhilipStark/book-genesis`, which was repointed today and is
       no longer watched, so they can never be rediscovered
-- [ ] **Not yet run.** The seeder has not been executed against Turso; the nightly workflow is
-      disabled. First run should be manual and watched
+- [x] First manual run against Turso, 2026-09-06: 17/17 repos, inserted 25, skipped 9,975,
+      failed 3, and the deployed API served the new skills immediately
+- [x] Widen the typecheck to cover `scripts/` and `tests/` — `tsconfig.json` includes only
+      `src/**/*`, which is why a syntax error in `seed.ts` passed `npm run typecheck` and only
+      appeared when the seeder ran. Six errors surfaced, including `rescore.ts` declaring a
+      `SkillRow` without `owner` while using `skill.owner`
+- [ ] ⚠ **Retry-on-change for parse failures.** Recording a PARSE_FAILED url in
+      `seen_source_urls` blacklists it forever, so a SKILL.md whose author later fixes the YAML
+      is never reconsidered. The earlier fix replaced "retried forever" with "never retried".
+      Store the failing blob sha — `discoverSkillPaths` already receives it from the tree API
+      and throws it away — and retry only when it changes. No extra API calls
+- [ ] Re-enable the nightly workflow once retry-on-change lands
 
 **Why this is before the import.** Today the seeder loads *every* known URL into an in-memory
 `Set` on every run. At 1.61M skills plus seen URLs that is ~3,200 paginated round trips and

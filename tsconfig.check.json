@@ -1,0 +1,16 @@
+{
+  // Typecheck everything, not just what ships.
+  //
+  // tsconfig.json includes only src/**/* because that is what the build emits, and its rootDir
+  // is src. The effect was that scripts/ and tests/ were never checked at all — a syntax error
+  // in scripts/seed.ts passed `npm run typecheck` cleanly and only surfaced when the seeder was
+  // actually run. rootDir is widened here purely so the wider include is legal; nothing is
+  // emitted, so it has no effect on the build.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": ["src/**/*", "scripts/**/*", "tests/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

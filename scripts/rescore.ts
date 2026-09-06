@@ -115,6 +115,9 @@ async function clearCheckpoint(): Promise<void> {
 }
 
 interface SkillRow {
+  // `owner` is selected by loadAllSkills and used to scope the update below. It was missing
+  // from this interface and nothing complained, because scripts/ was outside the typecheck.
+  owner: string;
   name: string;
   source_url: string;
   score: number | null;

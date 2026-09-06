@@ -91,7 +91,7 @@ describe("POST /skills — parity with the nightly sync", () => {
     const res = await post(VALID_BODY);
 
     expect(res.status).toBe(422);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.code).toBe("UNPROCESSABLE");
     expect(body.error).toContain("name");
     expect(createSkill).not.toHaveBeenCalled();

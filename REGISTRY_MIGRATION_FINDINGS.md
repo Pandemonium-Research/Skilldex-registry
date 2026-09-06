@@ -208,6 +208,61 @@ full table scan — 17 scans of 1.6M rows per nightly run.
 
 ---
 
+## 1e. First seeder run on Turso — and a flaw it exposed
+
+2026-09-06, manual, all 17 repos.
+
+| | Before | After |
+|---|---:|---:|
+| `skills` | 4,838 | **4,863** (+25) |
+| `seen_source_urls` | 10,929 | **10,932** (+3) |
+| `felipelobomotta-blip` | 0 | **25** |
+
+`Inserted: 25, Skipped: 9975, Failed: 3`, all 17 repos stamped, and the deployed API served the
+new skills immediately. Seeder → Turso → Vercel verified end to end.
+
+### ⚠ `markSeen` on PARSE_FAILED is too aggressive
+
+All three failures were genuine YAML errors, correctly classified:
+
+```
+book-genesis-codex   Nested mappings are not allowed in compact mappings (line 2, col 14)
+editorial-package    Nested mappings are not allowed in compact mappings (line 2, col 14)
+trim-md              Unexpected scalar at node end (line 3, col 28)
+```
+
+The first two are the same authoring mistake: an **unquoted `description:` containing a
+colon-space**, which YAML reads as a nested mapping. `trim-md` is
+`argument-hint: [--dry-run] <paths...>` — a flow sequence with a trailing scalar.
+
+**These are fixable by their authors, and the current code guarantees we never notice.**
+Recording a PARSE_FAILED url in `seen_source_urls` blacklists it permanently. The reasoning
+was "the same SKILL.md parses the same way tomorrow" — true of the same *bytes*, but the file
+can change, and `source_url` carries no content identity.
+
+So the earlier fix traded one flaw for its opposite: before, broken files were re-fetched
+forever; now, fixed files are ignored forever. Neither is right.
+
+**The fix is retry-on-change, and it is nearly free.** `discoverSkillPaths` already receives
+each blob's `sha` from the tree API and discards it. Recording the failing blob sha alongside
+the url means a run can retry precisely when the file has changed — no extra API calls, since
+the sha arrives in the discovery response that is already being made.
+
+Also worth noting for its own sake: `editorial-package` scored 100 under
+`PhilipStark/book-genesis` and now fails to parse under `felipelobomotta-blip/book-genesis-v4`,
+so the file was edited between the two publications and the edit broke it.
+
+### Widening the typecheck found real problems
+
+The seeder's first run crashed on a syntax error that `npm run typecheck` had reported clean —
+`tsconfig.json` includes only `src/**/*`, so **`scripts/` and `tests/` were never checked at
+all.** A `tsconfig.check.json` covering all three surfaced six errors, one of them a latent
+type lie: `scripts/rescore.ts` declared its own `SkillRow` **without `owner`**, while the query
+selects it and the update uses `skill.owner` to scope the write. It works only because the rows
+are cast.
+
+---
+
 ## 2. `(owner, name)` collisions in the full corpus
 
 The measurement that decided the naming rule. Query: `dedup_primary = 1` (one row per

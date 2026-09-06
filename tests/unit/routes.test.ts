@@ -10,7 +10,7 @@ describe("Health route", () => {
     const res = await app.request("/health");
     expect(res.status).toBe(200);
 
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body).toEqual({ status: "ok", version: "1.0.0" });
   });
 });
@@ -125,7 +125,7 @@ describe("Rate limiter", () => {
     // 4th should be rate limited
     const res = await app.request("/");
     expect(res.status).toBe(429);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.code).toBe("RATE_LIMITED");
   });
 });

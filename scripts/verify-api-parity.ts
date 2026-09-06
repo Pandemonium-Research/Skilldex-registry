@@ -66,12 +66,14 @@ const EXPECTED_ORDER_DIFF = new Set([
 
 const j = (v: unknown) => JSON.stringify(v);
 
-async function local(path: string) {
+type Probe = { status: number; body: any };
+
+async function local(path: string): Promise<Probe> {
   const res = await app.request(`/v1${path}`);
   return { status: res.status, body: await res.json().catch(() => null) };
 }
 
-async function remote(path: string) {
+async function remote(path: string): Promise<Probe> {
   const res = await fetch(`${REMOTE}${path}`);
   return { status: res.status, body: await res.json().catch(() => null) };
 }
