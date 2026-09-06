@@ -726,3 +726,112 @@ added, Browse by tag), and draws its headline from `/v1/stats` rather than from 
 
 `001` recorded as already-in-effect, `002` (source, stats, tags) and `003` (delistings) applied.
 `npm run delist -- list` reports no delistings, which is the expected starting state.
+
+---
+
+## 11. The corpus acceptance test — first real run at 1.6M
+
+Phase 4b was designed against a >90s timeout but had never been *run* against the corpus: the
+live database has 4,863 rows, and no test can reproduce a scale-only failure. This is that run,
+executing the real `searchSkills` code path against `skilldex-registry-v2` after preparing it.
+
+### The blocker is gone
+
+| Query | Before | After |
+|---|---|---|
+| Default `/v1/skills` listing | **>90s, timed out** | **1,338ms**, `total=1615322 eq` |
+
+Exact total, from the precomputed row, at 1.6M rows. That is what phases 4b existed to deliver.
+
+### Two problems the small database could never have shown
+
+**`?source=seeded` took 87 seconds.** The partial indexes are declared
+`WHERE source <> 'imported'`, and **SQLite matches partial indexes syntactically** — a query
+saying `source = 'seeded'` does not qualify, so the planner falls back to `SCAN skills` over
+1.6M rows.
+
+| Predicate | Plan | Time |
+|---|---|---|
+| `source = 'seeded'` | `SCAN skills` | **87,047ms** |
+| `source <> 'imported' AND source = 'seeded'` | `SCAN skills USING INDEX skills_curated_installs_idx` | **1,152ms** |
+
+The fix is to emit the index's own predicate as a redundant-looking conjunct. It is not
+redundant — it is what makes the index eligible. `imported` is excluded from this treatment
+because it is 99.7% of the table, where the bounded count hits its cap immediately anyway
+(266ms).
+
+**The 27s first search was cold cache, not a query problem.** A repeat of the same FTS query
+ran in 367ms. This also explains the earlier "6.4s FTS search" figure — same effect. Cold-cache
+timings on Turso are not query costs, and the two must not be conflated.
+
+Two smaller wins found while measuring:
+
+- **The FTS count does not need the skills table.** With a text query and no other predicate,
+  counting matches straight from `skills_fts` skips a rowid lookup per match: 1,535ms → 709ms
+  on `kubernetes` (6,819 matches).
+- **`ORDER BY m.rank, m.seq` beats `m.rank, s.seq`** (277ms vs 367ms). Identical rows — `m.seq`
+  *is* `s.seq` by the join condition — but ordering on the subquery alone lets SQLite sort
+  before touching the table.
+
+### Where it landed
+
+Real `searchSkills`, warm, against 1,615,322 rows:
+
+| Query | Time | Result |
+|---|---|---|
+| Default listing | 1,338ms | `1615322 eq` |
+| `source=seeded` | **300ms** | `4863 eq` |
+| `source=imported` | 294ms | `10000 gte` |
+| `tier=verified` | 237ms | `7 eq` |
+| `sort=recent` | 242ms | `1615322 eq` |
+| `offset=9980` | 234ms | — |
+| `q=react hooks` | 1,960ms | `4261 eq` |
+| `q=kubernetes` | 3,776ms | `6819 eq` |
+| `q=pdf` | 3,840ms | `10000 gte` |
+| `q=pdf&source=seeded` | 367ms | `55 eq` |
+
+**Free-text search at ~2–4s is now the slowest thing in the registry** and the obvious next
+target. It is workable — these are cacheable, and a repeat is far quicker — but it is the one
+number that would still be felt by a user.
+
+### Turso schema operations are slow on a large database
+
+`ALTER TABLE skills ADD COLUMN` is documented as independent of table size, and is instant on a
+1.9 GB local file. On Turso it **exceeded the libSQL HTTP client's timeout** and took 4m38s via
+the CLI. Worse, a `pragma_table_info` check immediately afterwards still reported the column
+absent, so the first attempt looked like a clean failure when it had in fact succeeded.
+
+Two consequences for any future migration against a corpus-sized database: use the Turso CLI
+rather than the HTTP client for DDL, and **verify by re-reading rather than trusting an error**
+— a timeout is not evidence the statement did not run.
+
+The `UPDATE` relabelling 4,863 rows took 39s, which is the full-scan cost of finding them
+(`content_key IS NULL` has no index) plus 4,863 FTS trigger firings.
+
+---
+
+## 12. State of `skilldex-registry-v2`, prepared 2026-09-06
+
+Brought up to the current schema by `scripts/prepare-corpus-db.ts` rather than rebuilt — a
+rebuild is ~48 minutes and needs the dataset mounted.
+
+| | |
+|---|---|
+| Rows | 1,615,322 — **1,610,459 imported + 4,863 seeded** |
+| Verified | 7 |
+| Owners | 158,915 |
+| Tags | 11 distinct |
+| Skillsets | 0 |
+| Migrations | 001, 002, 003 recorded as applied |
+
+The seeded count matches the live registry's 4,863 exactly, which is the check that
+`content_key IS NULL` identified the merged rows correctly.
+
+⚠ **The `source` default is flipped in this script relative to migration 002.** 002 defaults to
+`'seeded'`, correct for the live registry where every row came from the seeder. On the corpus
+that would mark all 1.6M rows seeded and then need an UPDATE across the corpus to correct —
+1.6M firings of `skills_au`, each rewriting two FTS5 tables. Defaulting to `'imported'` and
+updating only the ~4,863 rows with a null `content_key` reaches the same end state and touches
+0.3% of the table.
+
+**Still not cut over.** `TURSO_DATABASE_URL` points at `skilldex-registry`.

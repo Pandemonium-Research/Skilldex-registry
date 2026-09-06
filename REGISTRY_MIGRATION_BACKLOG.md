@@ -128,10 +128,23 @@ the truncated preload already fixed in `d375723` — latent rather than absent.
 
 ## Phase 4 — Import the corpus 🟡
 
-**Built, merged and uploaded to `skilldex-registry-v2`; nothing points at it.** Cutover is
-gated on phase 7, and the corpus database still needs `source` — either a rebuild (which now
-applies 002 automatically and sets `source` at INSERT time) or the default-flip patch
-documented at the foot of `schema/sqlite/002_source_and_stats.sql`.
+**Built, merged, uploaded and now schema-current. Nothing points at it yet.**
+
+- [x] Corpus brought up to migrations 002 + 003 by `scripts/prepare-corpus-db.ts` — the
+      flipped-default patch, so only ~4,863 rows are relabelled rather than 1.6M
+- [x] Stats and tag facets populated: 1,615,322 skills (1,610,459 imported + 4,863 seeded),
+      158,915 owners, 7 verified, 11 tags. The seeded count matching the live registry exactly
+      is the check that `content_key IS NULL` identified the merged rows correctly
+- [x] **Acceptance test run** — the real `searchSkills` against 1.6M. Default listing
+      **>90s timeout → 1,338ms** with an exact total. FINDINGS §11
+- [x] Two scale-only faults found and fixed in the process: `?source=seeded` taking 87s (D19),
+      and the FTS count doing a needless rowid lookup per match
+- [ ] **Cut over** — point `TURSO_DATABASE_URL` at `skilldex-registry-v2`, redeploy, keep the
+      old database for rollback
+- [ ] **Then** switch `seed.ts` to `tree/HEAD` (D14) — never before
+
+⚠ Free-text search is now the slowest path at ~2–4s (`q=pdf` 3,840ms). Workable and cacheable,
+but it is the one number a user would still feel, and the obvious next target.
 
 
 - [ ] `scripts/build-corpus.ts` — DuckDB over the Parquet mirror → one local SQLite file

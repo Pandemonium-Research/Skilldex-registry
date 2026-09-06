@@ -574,6 +574,38 @@ would mean an archive table rather than a flag — the flag design does not beco
 
 ---
 
+## D19 — Provenance filters carry the partial index's predicate as a conjunct
+
+`WHERE source = 'seeded'` on the 1.6M corpus took **87 seconds**. The same rows with
+`WHERE source <> 'imported' AND source = 'seeded'` take **1.15 seconds**.
+
+The cause is that SQLite matches partial indexes **syntactically**. `skills_curated_installs_idx`
+is declared `WHERE source <> 'imported'`; a query asking for `source = 'seeded'` implies that
+predicate logically, but the planner does not derive the implication, so the index is not
+eligible and it falls back to `SCAN skills`.
+
+**Decision.** The query builder emits `s.source <> 'imported' AND s.source = ?` for any value
+other than `'imported'`. The first conjunct exists purely to make the index eligible; the
+second narrows to the exact value, which matters because 'seeded' and 'published' are different
+things and a query for one must not return the other.
+
+`'imported'` is deliberately excluded from this treatment. It is 99.7% of the table, so there is
+no small side to seek: the bounded count reaches its cap within milliseconds and the page query
+is served by `skills_install_count_idx` (266ms measured).
+
+The alternative — a plain index on `skills(source)` — was rejected. It would carry an entry per
+row for a column with three values, adding tens of megabytes to a database that already sits at
+1.89 GB against a 2 GB `--from-file` ceiling, and 001 already cut 192 MB of indexes to fit.
+
+**Why this matters beyond one query.** A filter that is *supposed* to narrow to 0.3% of the
+table instead scanning all of it is a denial-of-service vector against our own API, reachable
+from a public query parameter. It is invisible below about a million rows.
+
+**What would reverse this.** SQLite gaining implication analysis for partial-index matching, or
+the ceiling ceasing to bind so a plain index becomes affordable.
+
+---
+
 ## What this migration loses
 
 Recorded honestly, so none of it is discovered later as a surprise.

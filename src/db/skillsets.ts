@@ -15,7 +15,7 @@ import type { InArgs } from "@libsql/client";
 
 /** `seq` breaks ties so LIMIT/OFFSET paging is stable — see the note in skills.ts. */
 const SORT_MAP: Record<string, string> = {
-  relevance: "m.rank ASC, s.seq ASC",
+  relevance: "m.rank ASC, m.seq ASC",
   installs: "s.install_count DESC, s.seq ASC",
   score: "s.score DESC, s.seq ASC",
   recent: "s.published_at DESC, s.seq ASC",

@@ -22,7 +22,9 @@ import type { InArgs } from "@libsql/client";
  */
 const SORT_MAP: Record<string, string> = {
   // bm25 returns negative scores, best first, so ASC is most-relevant-first.
-  relevance: "m.rank ASC, s.seq ASC",
+  // m.seq, not s.seq — identical by the join condition, but ordering on the subquery
+  // alone lets SQLite sort before touching the table.
+  relevance: "m.rank ASC, m.seq ASC",
   installs: "s.install_count DESC, s.seq ASC",
   score: "s.score DESC, s.seq ASC",
   recent: "s.published_at DESC, s.seq ASC",
@@ -104,10 +106,18 @@ export async function searchSkills(params: SearchSkillsQuery): Promise<SearchSki
     : "skills s";
 
   // Provenance filter. Unset by default: the whole registry is searchable, which is the point
-  // of having imported it. `skills_curated_*_idx` are partial on `source <> 'imported'` and
-  // still serve a seeded-scoped browse from a ~4.8k-entry index when one is asked for.
+  // of having imported it.
+  //
+  // ⚠ The redundant-looking `source <> 'imported'` is load-bearing. The partial indexes are
+  // declared WHERE source <> 'imported', and SQLite matches partial indexes *syntactically* —
+  // `source = 'seeded'` on its own does not qualify, so the planner falls back to SCAN skills.
+  // Measured on the 1.6M corpus: 87,047ms without the conjunct, 1,152ms with it, same rows.
+  // 'imported' is excluded because it is 99.7% of the table; there the bounded count hits its
+  // cap almost immediately and the page query is served by the install_count index (266ms).
   if (params.source) {
-    where.push("s.source = ?");
+    where.push(
+      params.source === "imported" ? "s.source = ?" : "s.source <> 'imported' AND s.source = ?"
+    );
     whereArgs.push(params.source);
   }
 
@@ -189,16 +199,21 @@ export async function searchSkills(params: SearchSkillsQuery): Promise<SearchSki
   // itself is single-digit milliseconds), so issuing the page and the count separately would
   // double the cost of every search. batch() sends both in one request, which preserves the
   // property the original count(*) OVER () comment was written to defend.
-  const [pageRes, countRes] = await db.batch(
-    [
-      pageStmt,
-      {
+  // With a text query and no other predicate, the count never needs the skills table at all —
+  // counting FTS matches directly skips one rowid lookup per match (1,535ms -> 709ms measured
+  // on `kubernetes`, 6,819 matches).
+  const ftsOnlyCount = Boolean(fts) && where.length === 0;
+  const countStmt = ftsOnlyCount
+    ? {
+        sql: boundedCountSql("skills_fts", "WHERE skills_fts MATCH ?"),
+        args: [fts as string, countLimitArg()],
+      }
+    : {
         sql: boundedCountSql(fromCount, whereSql),
         args: [...ftsArgs, ...whereArgs, countLimitArg()],
-      },
-    ],
-    "read"
-  );
+      };
+
+  const [pageRes, countRes] = await db.batch([pageStmt, countStmt], "read");
 
   const { page, has_more } = takePage(pageRes.rows, params.limit);
   return {
