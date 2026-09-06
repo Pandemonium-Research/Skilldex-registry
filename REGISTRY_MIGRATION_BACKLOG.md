@@ -41,6 +41,11 @@ Effort figures are estimates, not commitments.
 
 ## Phase 1 — Schema and parity 🔨
 
+> **These rows are a rehearsal, not the final data.** They will be discarded when phase 4
+> builds the real database. The point is to exercise the whole path — schema, type
+> conversion, FTS triggers, parity — at 4,838 rows, where a mistake costs seconds instead of
+> a 1.6M-row rebuild. It also unblocks phase 2, which needs something to develop against.
+
 - [ ] `schema/sqlite/001_schema.sql` — six tables, FTS5 external content, trigram table,
       triggers, indexes
 - [ ] `scripts/migrate-to-turso.ts` — copy the live rows out of Supabase
@@ -102,7 +107,14 @@ the truncated preload already fixed in `d375723` — latent rather than absent.
           `owner/name-<hash8>`
     - [ ] contested, descriptions differ → all get `owner/name-<hash8>`; bare name reports
           ambiguity
-    - [ ] existing rows (`content_key IS NULL`) are never displaced
+    - [ ] hand-published rows (`content_key IS NULL`) are never displaced — forward-looking
+          policy; **vacuous for this import**, since none of the 4,838 live rows are
+          hand-published (D13 revision)
+    - [ ] do **not** grandfather the 4,838 live rows. They are insert-order winners of 15,767
+          candidates, and 10,929 siblings were silently dropped. Re-derive them from the
+          corpus, which covers 16/17 watched repos (the 17th has no skills)
+    - [ ] carry `install_count` over, matched on `source_url` — the only real signal in the
+          old rows, and D10 makes it the default sort's input
     - [ ] extend `slugifySkillName` with the suffix form, truncating the base to 91 chars
     - [ ] unit-test determinism: the same input twice must produce identical slugs, and the
           result must not depend on row order

@@ -158,6 +158,29 @@ so any per-owner aggregation must read all 31 shards. A subset would silently un
 All 4,838 skills declare `spec_version` **1.0**; **zero** declare 1.1. If the spec has moved,
 the registry has no knowledge of it.
 
+### Provenance of the 4,838 rows — none are hand-published
+
+Measured because D13's incumbency rule depended on the opposite being true.
+
+| | |
+|---|---|
+| Distinct owners in `skills` | 16 — **all** are watched-repo owners |
+| Publishers | 1: `skilldex-official`, the seeder's own |
+| Rows with `content_key` | **0** |
+| `install_count` maximum | **4** |
+| URLs fetched then discarded on name conflict | **10,929** — `sickn33` 8,104, `alirezarezvani` 1,028, `TerminalSkills` 1,013 |
+
+Everything in the registry arrived through `scripts/seed.ts` using the service key, which
+bypasses auth entirely — consistent with the publisher-identity bug that makes the
+authenticated publish path unusable. So there is no hand-published content to protect, and
+the 4,838 kept rows are simply the arbitrary insert-order winners of 15,767 candidates.
+
+**Corpus coverage of the watched repos: 16 of 17.** `sickn33/antigravity-awesome-skills` and
+`OpenAEC-Foundation/…` appear under their post-rename names
+(`sickn33/agentic-awesome-skills`, `Impertio-Studio/…`). Only `tiandee/awesome-skills-hub` is
+absent, and discovery finds **0** `SKILL.md` files in it. Nothing unique would be lost by
+rebuilding the watched repos from the corpus.
+
 **Tags are effectively unused today** — sampled over 1,000 rows: average **0.23** tags per
 skill, maximum 1, 77% have none, 2 distinct values in the sample. This is why D8 defers the
 normalised tag table rather than building it; whether the *imported* corpus carries dense

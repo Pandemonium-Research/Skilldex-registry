@@ -248,7 +248,7 @@ unreliable.
 | **Uncontested** — one distinct content for `(owner, slug)` (~1.40M groups) | bare `owner/name` |
 | **Contested, all contents share one description** (42,794 groups) | lowest `file_sha` keeps `owner/name`; the rest become `owner/name-<hash8>` |
 | **Contested, descriptions differ** (31,806 groups) | **nobody** keeps the bare name; all become `owner/name-<hash8>`, and bare `owner/name` reports ambiguity |
-| **Existing hand-published rows** (`content_key IS NULL`) | always keep their bare name; an import can never displace one |
+| **Hand-published rows** (`content_key IS NULL`) | always keep their bare name; an import can never displace one — but see the revision below, this is **vacuous today** |
 
 `<hash8>` is the first 8 hex characters of `content_key`, which is the dataset's `file_sha`.
 
@@ -285,6 +285,41 @@ the 100-character slug cap is never threatened (the base is truncated to 91 befo
 
 **What would reverse this.** Nothing cheaply — this becomes a URL contract, and changing it
 later renames skills people have installed. If it must change, it needs a redirect table.
+
+### Revision, 2026-09-06 — the live rows are not incumbents
+
+The fourth case was written assuming the 4,838 rows already in the registry were
+hand-published and therefore deserved protection. **They are not.** Measured:
+
+| | |
+|---|---|
+| Skills from a hand-publish | **zero** — all 16 distinct owners are watched-repo owners, the only publisher is `skilldex-official`, and `content_key` is null on every row |
+| `install_count` | peaks at **4** |
+| URLs already discarded by name collision | **10,929**, all from watched repos (`sickn33` alone: 8,104) |
+| Watched repos covered by the corpus | **16 of 17** — two were renamed; `tiandee/awesome-skills-hub` is absent but contains 0 `SKILL.md` |
+
+Every one of those rows came from `scripts/seed.ts` under `ON CONFLICT (owner,name) DO
+NOTHING`, which picked winners **by insert order** and silently dropped 10,929 siblings — with
+no content hash available to distinguish a duplicate copy from a genuinely different skill.
+
+So grandfathering them would freeze an arbitrary sample as truth and permanently orphan the
+rest, while protecting nothing unique: the corpus already covers every watched repo that has
+any skills at all.
+
+**Revised:** the incumbency rule stays as *forward-looking* policy — once auth is repaired and
+real publishing happens, those skills must never be displaced by an import. But it applies to
+nothing today, so **the 4,838 rows are re-derived through D13 like everything else** rather
+than grandfathered.
+
+**Carried over regardless:** `install_count`, matched on `source_url`. It is tiny, but it is
+the only genuine signal in there and it is what D10 makes the default sort read.
+
+**What this buys.** The 10,929 discarded URLs are reconsidered instead of assumed lost. Many
+will dedup away as byte-identical copies, but the genuinely different ones get a hash-suffixed
+name rather than silence.
+
+**Credit where due:** this was Pranav's objection, not a review finding. The original rule
+would have shipped.
 
 ---
 
