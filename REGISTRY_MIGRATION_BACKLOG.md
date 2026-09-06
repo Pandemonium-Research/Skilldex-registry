@@ -17,7 +17,7 @@ Effort figures are estimates, not commitments.
 | Phase | Work | Effort | Status |
 |---|---|---:|---|
 | **0** | Provision Turso, verify connectivity | 0.5d | ✅ done |
-| **1** | Schema + migrate live rows + parity check | 1d | 🔨 in progress |
+| **1** | Schema + migrate live rows + parity check | 1d | ✅ done |
 | **2** | Rewrite `src/db/*`; replace Supabase Auth | 2–3d | ⬜ |
 | **3** | Freshness #3 — kill the global preload | 0.5d | ⬜ |
 | **4** | Import the corpus | 2d | ⬜ |
@@ -39,20 +39,22 @@ Effort figures are estimates, not commitments.
 
 ---
 
-## Phase 1 — Schema and parity 🔨
+## Phase 1 — Schema and parity ✅
 
 > **These rows are a rehearsal, not the final data.** They will be discarded when phase 4
 > builds the real database. The point is to exercise the whole path — schema, type
 > conversion, FTS triggers, parity — at 4,838 rows, where a mistake costs seconds instead of
 > a 1.6M-row rebuild. It also unblocks phase 2, which needs something to develop against.
 
-- [ ] `schema/sqlite/001_schema.sql` — six tables, FTS5 external content, trigram table,
+- [x] `schema/sqlite/001_schema.sql` — six tables, FTS5 external content, trigram table,
       triggers, indexes
-- [ ] `scripts/migrate-to-turso.ts` — copy the live rows out of Supabase
-- [ ] Parity check — per-table row counts, plus the same search returning the same top
-      results from both backends
-- [ ] Confirm `json_each` works on this build (JSON functions are default-on since 3.38;
-      Turso is 3.47, so this is a formality — but confirm rather than assume)
+- [x] `scripts/migrate-to-turso.ts` — copy the live rows out of Supabase
+- [x] Parity check — 27 schema statements applied; all six tables match
+      (4,838 skills, 10,929 seen urls, 17 watched repos); top-5 search **identical** across
+      both backends; FTS `integrity-check` passes on all three virtual tables
+- [x] `json_each` confirmed working on real data
+- [x] Measured size: **7.3 MB**, and `skills` all-in is **1,104 B/row** — see
+      [REGISTRY_MIGRATION_FINDINGS.md](REGISTRY_MIGRATION_FINDINGS.md) §1b
 
 **Note.** `watched_repos` seed rows must NOT be re-inserted from `002_watched_repos.sql`.
 That file's `INSERT` is stale: it lists four repos on `main`, but production now has 17 rows,
@@ -132,7 +134,11 @@ the truncated preload already fixed in `d375723` — latent rather than absent.
       `TURSO_DATABASE_URL`. Cutover is one variable and the old database stays for rollback.
       `@libsql/client` accepts `file:` URLs, so `migrate-to-turso.ts` can target the build
       file with no change beyond the URL
-- [ ] Watch the **2 GB `--from-file` ceiling**; `--from-dump` is the fallback
+- [ ] **Measure the built file before uploading.** Projection from phase 1's real numbers is
+      **~1.77 GB against a 2 GB `--from-file` ceiling — only ~11% headroom.** Levers if it
+      comes in over: drop `skills_published_at_idx` (~109 MB, loses `?sort=recent`), drop the
+      trigram table (~93 MB, loses fuzzy matching), or fall back to `--from-dump`. Do not
+      discover this at upload time
 - [ ] Rejected alternative: inserting 1.6M rows into the live database. It fits the write
       budget (16% of 10M/month) but is 3,200+ round trips and non-atomic — a failure leaves a
       half-imported registry

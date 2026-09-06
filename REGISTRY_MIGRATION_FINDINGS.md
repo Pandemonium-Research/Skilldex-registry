@@ -37,6 +37,74 @@ what forced the move to Turso (D1).
 
 ---
 
+## 1b. Measured size in Turso — phase 1, 2026-09-06
+
+The first estimate that is measured rather than extrapolated from Postgres. After migrating
+the live registry into Turso, `dbstat` gives a per-object breakdown.
+
+**Whole database: 7.3 MB** — against ~18 MB for the same data in Supabase, so SQLite is
+roughly **2.5× more compact** here.
+
+| Object | KB |
+|---|---:|
+| `skills` (table) | 2,828 |
+| `seen_source_urls` | 1,828 |
+| `skills_fts_data` | 820 |
+| `skills_published_at_idx` | 328 |
+| `skills_trgm_data` | 280 |
+| `sqlite_autoindex_skills_1` (`id` unique) | 236 |
+| `sqlite_autoindex_skills_2` (`owner,name` unique) | 188 |
+| everything else | ~600 |
+
+`skills` all-in — table plus its FTS, trigram and eight indexes — is **1104 bytes/row**
+across 4,838 rows.
+
+### Projection to the full corpus
+
+**1104 B/row × 1,607,680 rows ≈ 1.77 GB.**
+
+That lands inside the earlier 1.5–1.8 GB estimate, which is reassuring given two previous
+attempts were wrong. Caveats, stated rather than buried:
+
+- B-tree and FTS posting lists **compress better at scale**, so this is likely an
+  over-estimate rather than under.
+- Corpus descriptions may be longer or shorter than the live registry's 186.9-byte average.
+- `seen_source_urls` (167 B/row) does not grow with the import — only the nightly seeder
+  writes there.
+
+### ⚠ The `--from-file` margin is thin
+
+Turso's `turso db create --from-file` caps at **2 GB**. A projection of ~1.77 GB leaves
+only about **11%** headroom. Levers if it comes in over:
+
+| Lever | Saving at 1.61M | Cost |
+|---|---:|---|
+| Drop `skills_published_at_idx` | ~109 MB | loses `?sort=recent` |
+| Drop the trigram table | ~93 MB | loses fuzzy name matching (D11) |
+| Truncate `description` | up to ~300 MB | degrades search quality |
+| `--from-dump` instead | — | different path, limits need checking |
+
+**Measure the built file before uploading.** Do not discover this at upload time.
+
+### Search quality is better, not merely ported
+
+`bm25()` gives real relevance ranking, which the Postgres path never applied — `searchSkills`
+narrowed with `textSearch` and then ordered by `install_count`, so relevance never entered the
+ordering at all. Verified on live data: `excel spreadsheet` returns `ComposioHQ/excel-automation`,
+`mxyhi/minimax-xlsx`, `TerminalSkills/excel-processor` in that order.
+
+Also verified end to end in Turso: trigram fuzzy matching (`kubern` → four `kubernetes-*`
+skills), `json_each` tag filtering, boolean round-tripping as 0/1, FTS `integrity-check` on all
+three virtual tables, and per-table row counts matching Supabase exactly. The top-5 search
+results were **identical** across both backends, which was not assumed — the parity check
+prints them rather than asserting equality, because the two tokenise differently.
+
+**Bare-name ambiguity is real in the live data**, which supports D13's approach: `agent-memory`,
+`brand-guidelines`, `deep-research`, `prototype` and `tdd` are each held by **three different
+owners** in only 4,838 rows.
+
+---
+
 ## 2. `(owner, name)` collisions in the full corpus
 
 The measurement that decided the naming rule. Query: `dedup_primary = 1` (one row per
