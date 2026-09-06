@@ -15,7 +15,6 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { getDb } from "../src/db/client.js";
-import { likePrefix } from "../src/db/like.js";
 import { fetchSkillFromGitHub } from "../src/github/fetch.js";
 import { validateSkill } from "../src/validator/index.js";
 import { slugifySkillName } from "../src/types/skill.js";
@@ -97,20 +96,30 @@ async function discoverSkillPaths(
 type KnownUrls = Map<string, { ingested: boolean; sha: string | null }>;
 
 async function knownUrlsForRepo(owner: string, repo: string): Promise<KnownUrls> {
-  const prefix = likePrefix(`https://github.com/${owner}/${repo}/`);
+  const rawPrefix = `https://github.com/${owner}/${repo}/`;
   const known: KnownUrls = new Map();
   try {
     const [inserted, seen] = await Promise.all([
+      // Selected by owner, then filtered to this repo in JS. The obvious query — source_url
+      // LIKE prefix — needs an index on source_url, and at 1.6M rows that index costs 159 MB
+      // against a 2 GB --from-file ceiling. Owner is already indexed as the leading column of
+      // the (owner, name) unique constraint, and the largest watched owner holds a few hundred
+      // rows, so the filter is free.
+      db.execute({ sql: "SELECT source_url AS u FROM skills WHERE owner = ?", args: [owner] }),
+      // A range, not LIKE. url is this table's primary key, but SQLite cannot use a
+      // BINARY-collated index for LIKE — LIKE is case-insensitive by default, so the plan
+      // came out as SCAN. Comparing against the prefix and its upper bound is an index seek,
+      // and it sidesteps wildcard escaping entirely.
       db.execute({
-        sql: "SELECT source_url AS u FROM skills WHERE source_url LIKE ? ESCAPE '\\'",
-        args: [prefix],
-      }),
-      db.execute({
-        sql: "SELECT url AS u, blob_sha AS s FROM seen_source_urls WHERE url LIKE ? ESCAPE '\\'",
-        args: [prefix],
+        sql: "SELECT url AS u, blob_sha AS s FROM seen_source_urls WHERE url >= ? AND url < ?",
+        args: [rawPrefix, `${rawPrefix}\uffff`],
       }),
     ]);
-    for (const r of inserted.rows) known.set(String(r.u), { ingested: true, sha: null });
+    for (const r of inserted.rows) {
+      const u = String(r.u);
+      if (!u.startsWith(rawPrefix)) continue; // same owner, different repo
+      known.set(u, { ingested: true, sha: null });
+    }
     for (const r of seen.rows) {
       if (known.has(String(r.u))) continue; // an ingested skill wins over a stale seen row
       known.set(String(r.u), { ingested: false, sha: r.s == null ? null : String(r.s) });

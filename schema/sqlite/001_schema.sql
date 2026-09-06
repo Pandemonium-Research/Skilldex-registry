@@ -71,11 +71,17 @@ CREATE UNIQUE INDEX skills_content_key_key ON skills (content_key)
 
 -- Bare-name lookup for CLI builds predating the owner namespace (getSkillByBareName).
 CREATE INDEX skills_name_lookup_idx  ON skills (name);
--- Prefix lookup for the nightly seeder, which asks "what do I already know about THIS repo?"
--- with source_url LIKE 'https://github.com/owner/repo/%'. A BINARY-collated btree serves that
--- prefix scan; without it the seeder would table-scan 1.6M rows once per watched repo.
-CREATE INDEX skills_source_url_idx   ON skills (source_url);
-CREATE INDEX skills_owner_idx        ON skills (owner);
+
+-- Deliberately absent, and both were measured before being cut:
+--
+--   skills_source_url_idx (159 MB) served the seeder's source_url LIKE prefix scan. The
+--   seeder now selects by owner and filters to the repo in JS, which the (owner, name)
+--   constraint already indexes.
+--
+--   skills_owner_idx (33 MB) was pure duplication: SQLite serves WHERE owner = ? from the
+--   leading column of sqlite_autoindex_skills_2, with the same SEARCH plan.
+--
+-- Together they are 192 MB against a 2 GB --from-file ceiling the corpus was exceeding.
 CREATE INDEX skills_trust_tier_idx   ON skills (trust_tier);
 CREATE INDEX skills_install_count_idx ON skills (install_count DESC);
 CREATE INDEX skills_score_idx        ON skills (score DESC);
