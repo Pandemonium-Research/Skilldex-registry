@@ -51,7 +51,21 @@ export async function fetchSkillFromGitHub(sourceUrl: string): Promise<SkillMeta
     );
   }
 
-  const parsed = parseYaml(frontmatter) as Record<string, any>;
+  // parseYaml throws on malformed YAML, and the throw used to escape uncaught, carrying
+  // the yaml library's own code (UNEXPECTED_TOKEN and friends). Callers that branch on
+  // PARSE_FAILED — seed.ts decides whether a url is worth retrying by exactly that — then
+  // treated a permanently broken file as a transient blip and re-fetched it every run.
+  // Real example: `argument-hint: [--dry-run] <paths...>`, a flow sequence with a trailing
+  // scalar. The validator already guards its own parse; this is the same contract.
+  let parsed: Record<string, any>;
+  try {
+    parsed = parseYaml(frontmatter) as Record<string, any>;
+  } catch (err: any) {
+    throw Object.assign(
+      new Error(`SKILL.md frontmatter is not valid YAML: ${err?.message ?? err}`),
+      { code: "PARSE_FAILED" }
+    );
+  }
 
   return {
     name: parsed.name ?? "",

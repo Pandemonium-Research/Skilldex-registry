@@ -91,6 +91,20 @@ describe("fetchSkillFromGitHub", () => {
     });
   });
 
+  // `argument-hint: [--dry-run] <paths...>` is a flow sequence with a trailing scalar —
+  // invalid YAML. The yaml library throws UNEXPECTED_TOKEN; that used to escape uncaught,
+  // so the seeder could not tell a permanently broken file from a transient failure and
+  // retried it on every nightly run.
+  it("reports PARSE_FAILED when the frontmatter is not valid YAML", async () => {
+    stubGitHub(
+      ["---", "name: trim-md", "argument-hint: [--dry-run] <paths...>", "---", "", "# Trim"].join("\n")
+    );
+
+    await expect(fetchSkillFromGitHub(SOURCE_URL)).rejects.toMatchObject({
+      code: "PARSE_FAILED",
+    });
+  });
+
   it("reports FETCH_FAILED — not PARSE_FAILED — when SKILL.md cannot be read", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 404 })));
 
