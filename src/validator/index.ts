@@ -260,7 +260,11 @@ export function validateSkill(input: ValidatorInput): ValidationResult {
 // --- Helpers ---
 
 function extractFrontmatter(content: string): string | null {
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  // \r? on both delimiters: a SKILL.md authored on Windows opens with "---\r\n", which a
+  // bare \n pattern does not match. Such files were reported as having no frontmatter at
+  // all — the fetcher threw PARSE_FAILED and the validator scored them 0 — even though the
+  // YAML itself is well-formed and the parser handles CRLF without complaint.
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   return match ? match[1] : null;
 }
 

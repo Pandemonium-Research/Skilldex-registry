@@ -160,6 +160,26 @@ describe("validateSkill", () => {
     expect(readmeDiag!.level).toBe("warning");
   });
 
+  // A SKILL.md authored on Windows is byte-for-byte the same document with CRLF line
+  // endings. The frontmatter matcher used to require a bare \n, so these scored 0 —
+  // "missing frontmatter" — despite the YAML being perfectly well formed.
+  // The CRLF variant is built here rather than committed as a fixture: git's autocrlf
+  // normalisation would quietly rewrite a fixture file and the test would stop testing
+  // anything.
+  it("scores a CRLF skill exactly as it scores the same skill with LF", () => {
+    const lf = readFixture("valid-skill.md");
+    const crlf = lf.replace(/\n/g, "\r\n");
+    expect(crlf).toContain("---\r\n"); // guard: the variant really is CRLF
+
+    const files = ["scripts/analyze.sh", "references/guide.md"];
+    const lfResult = validateSkill({ skillMd: lf, files });
+    const crlfResult = validateSkill({ skillMd: crlf, files });
+
+    expect(crlfResult.score).toBe(lfResult.score);
+    expect(crlfResult.diagnostics).toEqual(lfResult.diagnostics);
+    expect(crlfResult.score).toBe(100);
+  });
+
   it("caps score at 0 minimum", () => {
     // Skill with many issues
     const skillMd = `---
