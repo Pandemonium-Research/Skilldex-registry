@@ -18,8 +18,8 @@ Effort figures are estimates, not commitments.
 |---|---|---:|---|
 | **0** | Provision Turso, verify connectivity | 0.5d | ✅ done |
 | **1** | Schema + migrate live rows + parity check | 1d | ✅ done |
-| **2** | Rewrite `src/db/*`; replace Supabase Auth | 2–3d | ✅ code done — **deploy held** until phase 8 |
-| **3** | Freshness #3 — kill the global preload | 0.5d | ⬜ |
+| **2** | Rewrite `src/db/*`; replace Supabase Auth | 2–3d | ✅ **done and deployed** |
+| **3** | Port `seed.ts` to Turso **and** kill the global preload | 1d | 🔨 in progress |
 | **4** | Import the corpus | 2d | ⬜ |
 | **5** | Freshness #1+2 — repo SHA polling, compare diffs | 1.5d | ⬜ |
 | **6** | Freshness #4+5 — verify-on-read, priority queue | 1d | ⬜ |
@@ -76,10 +76,14 @@ That file's `INSERT` is stale: it lists four repos on `main`, but production now
       `github_handle`, which is already `UNIQUE`
 - [ ] Check whether a GitHub OAuth app already exists — `GITHUB_CLIENT_ID` /
       `GITHUB_CLIENT_SECRET` are already in `.env.example`, so this may be half-configured
-- [ ] Switch Vercel env vars at cutover; **leave `SUPABASE_*` in place** so rollback is one
-      variable, not a scramble
-- [ ] ⚠ **Do not deploy the Turso-backed API while the nightly seeder still writes to
-      Supabase.** `src/` is fully ported, but `scripts/seed.ts`, `rescore.ts` and
+- [x] Switch Vercel env vars at cutover; **leave `SUPABASE_*` in place** so rollback is one
+      variable, not a scramble. Note: setting env vars does **not** trigger a rebuild — the
+      first attempt served the old build until an explicit redeploy
+- [x] Deployed 2026-09-06 and verified live: `q=pdf` returns 55 ordered by relevance,
+      `q=invoices` 26, ambiguous names 409, unauthenticated `/auth/me` 401
+- [x] ⚠ **Do not deploy the Turso-backed API while the nightly seeder still writes to
+      Supabase.** Resolved by disabling the nightly workflow for the transition — the seeder
+      must be ported (phase 3 below) before it is re-enabled. `src/` is fully ported, but `scripts/seed.ts`, `rescore.ts` and
       `add-repo.ts` still use `@supabase/supabase-js`. Deploying now would split the brain:
       the seeder inserts into Supabase and the API reads Turso, so new skills would never
       appear. Either disable the nightly workflow for the transition, or hold the deploy
