@@ -23,9 +23,23 @@ const SCRIPT_EXTENSIONS = new Set([".sh", ".py", ".js", ".ts", ".rb"]);
 const DOC_EXTENSIONS = new Set([".md", ".txt", ".pdf"]);
 
 // Scoring weights — derived from a 2-axis spec rubric (mandate x failure impact),
-// normalized to 100. frontmatterParseable (16 pts) is implicit: unparseable
-// frontmatter is fatal and short-circuits to a score of 0 below.
+// normalized to 100. These sum to exactly 100 and match skilldex's table entry for
+// entry.
+//
+// Score ACCUMULATES from 0: a check adds its weight only when it passes. Do not
+// rewrite this as "start at 100, subtract on failure". The two are NOT equivalent,
+// because several checks are nested inside the `else` of a prerequisite —
+// nameFormat only runs when a name exists; descriptionLength and descriptionFormat
+// only when a description exists. Accumulating, a missing prerequisite forfeits its
+// dependent weights automatically. Subtracting, those deductions are simply never
+// reached, so a *missing* field costs less than a *malformed* one.
+//
+// That inversion is the bug this file shipped from 2026-07-09 (d15aa6c, which
+// copied skilldex's weights and branch shape into a count-down loop) until
+// 2026-09-04: a missing name scored 84 here against skilldex's 73, and a missing
+// description 84 against 67.
 const WEIGHTS = {
+  frontmatterParseable: 16,
   namePresent: 16,
   nameFormat: 11,
   descriptionPresent: 16,
@@ -52,7 +66,7 @@ export interface ValidationResult {
 
 export function validateSkill(input: ValidatorInput): ValidationResult {
   const diagnostics: ValidationDiagnostic[] = [];
-  let score = 100;
+  let score = 0;
 
   const lines = input.skillMd.split("\n");
 
@@ -78,6 +92,8 @@ export function validateSkill(input: ValidatorInput): ValidationResult {
     return { score: 0, diagnostics };
   }
 
+  score += WEIGHTS.frontmatterParseable;
+
   // --- Check: `name` field present (16 pts) ---
   const nameValue = parsed.name == null ? "" : String(parsed.name).trim();
   if (nameValue === "") {
@@ -86,8 +102,10 @@ export function validateSkill(input: ValidatorInput): ValidationResult {
       line: 1,
       message: "Missing required field: name",
     });
-    score -= WEIGHTS.namePresent;
+    // nameFormat is forfeited with it — there is no name to check the format of.
   } else {
+    score += WEIGHTS.namePresent;
+
     // --- Check: `name` format — kebab-case + not reserved (11 pts) ---
     const nameErrors: string[] = [];
     if (!KEBAB_CASE.test(nameValue)) {
@@ -105,7 +123,8 @@ export function validateSkill(input: ValidatorInput): ValidationResult {
       for (const message of nameErrors) {
         diagnostics.push({ level: "error", line: 1, message });
       }
-      score -= WEIGHTS.nameFormat;
+    } else {
+      score += WEIGHTS.nameFormat;
     }
   }
 
@@ -117,8 +136,11 @@ export function validateSkill(input: ValidatorInput): ValidationResult {
       line: 1,
       message: "Missing required field: description",
     });
-    score -= WEIGHTS.descriptionPresent;
+    // descriptionLength and descriptionFormat are forfeited with it — there is no
+    // description to measure or format-check.
   } else {
+    score += WEIGHTS.descriptionPresent;
+
     // --- Check: description length >= 30 words (6 pts) ---
     const wordCount = descValue.split(/\s+/).length;
     if (wordCount < MIN_DESCRIPTION_WORDS) {
@@ -127,7 +149,8 @@ export function validateSkill(input: ValidatorInput): ValidationResult {
         line: 1,
         message: `Description is ${wordCount} words (minimum ${MIN_DESCRIPTION_WORDS})`,
       });
-      score -= WEIGHTS.descriptionLength;
+    } else {
+      score += WEIGHTS.descriptionLength;
     }
 
     // --- Check: description format — char limit + no XML tags (11 pts) ---
@@ -146,7 +169,8 @@ export function validateSkill(input: ValidatorInput): ValidationResult {
       for (const message of descErrors) {
         diagnostics.push({ level: "error", line: 1, message });
       }
-      score -= WEIGHTS.descriptionFormat;
+    } else {
+      score += WEIGHTS.descriptionFormat;
     }
   }
 
@@ -157,13 +181,16 @@ export function validateSkill(input: ValidatorInput): ValidationResult {
       line: MAX_LINES,
       message: `SKILL.md is ${lines.length} lines (maximum ${MAX_LINES})`,
     });
-    score -= WEIGHTS.lineCount;
   } else if (lines.length > WARN_LINES) {
+    // The 400-500 band warns but keeps full credit, matching skilldex.
+    score += WEIGHTS.lineCount;
     diagnostics.push({
       level: "warning",
       line: WARN_LINES,
       message: `SKILL.md is ${lines.length} lines (warning threshold ${WARN_LINES})`,
     });
+  } else {
+    score += WEIGHTS.lineCount;
   }
 
   // --- Check: only allowed subdirectories (4 pts) + no README.md (4 pts) ---
@@ -189,9 +216,8 @@ export function validateSkill(input: ValidatorInput): ValidationResult {
       unknownDirCount++;
     }
   }
-  if (unknownDirCount > 0) {
-    score -= Math.min(WEIGHTS.allowedSubdirs, unknownDirCount * 2);
-  }
+  // Partial credit: 2 points per unknown dir, floored at 0 rather than going negative.
+  score += Math.max(0, WEIGHTS.allowedSubdirs - unknownDirCount * 2);
 
   if (hasReadme) {
     diagnostics.push({
@@ -200,7 +226,8 @@ export function validateSkill(input: ValidatorInput): ValidationResult {
       message:
         "README.md should not be inside the skill folder — put docs in SKILL.md or references/",
     });
-    score -= WEIGHTS.noReadme;
+  } else {
+    score += WEIGHTS.noReadme;
   }
 
   // --- Check: all referenced resources exist (7 pts) ---
@@ -217,8 +244,8 @@ export function validateSkill(input: ValidatorInput): ValidationResult {
       hasBrokenRef = true;
     }
   }
-  if (hasBrokenRef) {
-    score -= WEIGHTS.referencedResourcesExist;
+  if (!hasBrokenRef) {
+    score += WEIGHTS.referencedResourcesExist;
   }
 
   // --- Check: bundled resources in correct subdirs (2 pts) ---
@@ -247,8 +274,8 @@ export function validateSkill(input: ValidatorInput): ValidationResult {
       hasMisplacedFile = true;
     }
   }
-  if (hasMisplacedFile) {
-    score -= WEIGHTS.bundledResourcesCorrect;
+  if (!hasMisplacedFile) {
+    score += WEIGHTS.bundledResourcesCorrect;
   }
 
   return {
