@@ -105,6 +105,65 @@ owners** in only 4,838 rows.
 
 ---
 
+## 1c. The deployed search never matched descriptions — verified
+
+`src/db/skills.ts` called `textSearch("name, description", q)` and migration 001 built a GIN
+index over `to_tsvector('english', name || ' ' || description)`. The intent is unambiguous.
+The deployment never did it.
+
+**PostgREST silently truncates the column list at the comma.** Counts for `invoices`:
+
+| Filter | Rows |
+|---|---:|
+| `name=wfts(english).invoices` | **2** |
+| `description=wfts(english).invoices` | **25** |
+| `'name, description'=wfts(english).invoices` | **2** ← identical to name-only |
+| no filter | 4,838 |
+| a genuinely non-existent column | **HTTP 400**, `column skills.bogus does not exist` |
+
+Three readings rule out the alternatives: it is not an ignored filter (that returns 4,838),
+not an error (bogus columns do 400), and not a description match (that returns 25). It matched
+`name` and dropped the rest of the expression without complaint.
+
+### The replacement is a strict superset
+
+Asking Postgres *correctly* — `or=(name.wfts.X, description.wfts.X)` — against the new FTS5
+implementation:
+
+| Term | Deployed (broken) | Postgres, asked correctly | libSQL FTS5 |
+|---|---:|---:|---:|
+| `invoices` | 2 | 25 | **26** |
+| `pdf` | 12 | 42 | **55** |
+| `kubernetes` | 4 | 40 | **41** |
+
+Set-diffed on `pdf`: **0 results appear only in Postgres.** FTS5 returns everything Postgres
+does plus 13 more, and every extra is legitimate — the term appears inside a compound token:
+
+```
+sickn33/dsh-deepread        PDFs,
+TerminalSkills/canva        PDF/PNG/PPTX/MP4,
+sickn33/impress             (ODP/PPTX/PDF),
+TerminalSkills/chandra-ocr  PDFs/images,
+TerminalSkills/report-generator  PDF/HTML
+```
+
+Postgres's default parser classifies `PDF/PNG/PPTX/MP4` as a single file-like token and never
+splits it; FTS5's `unicode61` tokenizer splits on the non-alphanumerics. Higher recall, nothing
+lost.
+
+**Method note.** The parity check first reported these as failures and the reflex was to make
+the new code match the deployment. The deployment is not automatically the reference — it can
+be the thing that is wrong. Confirm which side is correct before conforming to it.
+
+### Still open: relevance is computed but unused
+
+`bm25()` is available, but when `q` is present results are ordered by `install_count`, because
+that is the default sort inherited from the Postgres code. Ordering a text search by popularity
+rather than relevance is questionable now and will be worse across 1.6M rows where
+`install_count` is zero almost everywhere. Not changed unilaterally — it is a product decision.
+
+---
+
 ## 2. `(owner, name)` collisions in the full corpus
 
 The measurement that decided the naming rule. Query: `dedup_primary = 1` (one row per
