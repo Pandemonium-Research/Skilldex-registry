@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { requireAuth } from "../middleware/auth.js";
 import { createSkillSchema, skillRowToApi } from "../types/skill.js";
+import { loadDelistings } from "../db/delistings.js";
 import { createSkill, getSkill, updateSkill, deleteSkill } from "../db/skills.js";
 import { fetchSkillFromGitHub, findRelocatedSkill } from "../github/fetch.js";
 import { validateSkill } from "../validator/index.js";
@@ -24,6 +25,22 @@ publishRoutes.post("/", requireAuth, async (c) => {
   // The publisher owns their namespace. Taking `owner` from the authenticated handle
   // rather than the request body is what stops anyone publishing into someone else's.
   const owner = publisher.github_handle;
+
+  // A takedown covering this namespace blocks publishing into it. Without this, an owner-scope
+  // delisting is undone the moment anyone publishes — including by accident. Lifting it is an
+  // explicit administrative act (`npm run delist -- remove`), not a side effect of a POST.
+  const delisted = await loadDelistings();
+  if (delisted.matches({ owner, name: parsed.data.name })) {
+    return c.json(
+      {
+        error:
+          "This namespace has been removed from the registry at the owner's request. " +
+          "Contact the registry maintainers to have it re-listed.",
+        code: "DELISTED",
+      },
+      403
+    );
+  }
 
   // Names are unique per owner, so a clash only matters within this namespace.
   const existing = await getSkill(owner, parsed.data.name);

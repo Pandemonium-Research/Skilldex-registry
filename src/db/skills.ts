@@ -103,12 +103,12 @@ export async function searchSkills(params: SearchSkillsQuery): Promise<SearchSki
       " FROM skills_fts WHERE skills_fts MATCH ?) m ON m.seq = s.seq"
     : "skills s";
 
-  // Curated tier only, by default. Every orderable signal in the registry lives in the ~4,863
-  // rows that came from watched repos rather than the corpus import — see
-  // REGISTRY_BROWSE_REDESIGN_PLAN.md. `skills_curated_installs_idx` is partial on exactly this
-  // predicate, so the planner serves the default browse from a ~4.8k-entry index.
-  if (params.scope === "curated") {
-    where.push("s.source <> 'imported'");
+  // Provenance filter. Unset by default: the whole registry is searchable, which is the point
+  // of having imported it. `skills_curated_*_idx` are partial on `source <> 'imported'` and
+  // still serve a seeded-scoped browse from a ~4.8k-entry index when one is asked for.
+  if (params.source) {
+    where.push("s.source = ?");
+    whereArgs.push(params.source);
   }
 
   if (params.tier) {

@@ -53,13 +53,13 @@ export const searchSkillsSchema = z.object({
   spec_version: z.string().optional(),
   tags: z.string().optional(), // comma-separated
   owner: z.string().optional(),
-  // Which tier to search. "curated" is everything the seeder and publishers put here; "all"
-  // adds the imported corpus.
+  // Provenance filter, using the column's own values. Unset means the whole registry.
   //
-  // Defaults to "curated" so existing callers — including published skilldex-cli builds —
-  // keep getting the small, meaningful, exactly-countable set rather than 1.6M rows in which
-  // every ordering signal is degenerate.
-  scope: z.enum(["curated", "all"]).default("curated"),
+  // Deliberately NOT defaulted. An earlier revision defaulted this to the seeded tier on the
+  // grounds that all the ordering signal lives there — true, but that is an argument about
+  // sorting an unfiltered list, not about search. bm25 ranks fine across the full corpus, and
+  // defaulting to 0.3% of the registry defeats the point of importing the other 99.7%.
+  source: z.enum(["seeded", "imported", "published"]).optional(),
   // No static default: the effective sort depends on whether `q` is present, and that
   // cannot be expressed here. Resolved in the db layer — a text search defaults to
   // relevance, a browse defaults to installs.

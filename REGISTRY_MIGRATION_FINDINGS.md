@@ -653,3 +653,32 @@ Verified against the deployed API:
 `anthropics/pdf`, `ComposioHQ/pdf` — bm25-ranked, 55 exact results. This closes §1c's "still
 open: relevance is computed but unused": the web app was sending `sort=installs` on every
 search, overriding `resolveSort()` and ordering by a column that is 0 for all but 33 rows.
+
+
+---
+
+## 9. A wrong inference from §6, shipped and corrected
+
+§6 measures that every orderable dimension is degenerate across the corpus and that all the
+signal sits in the 4,863 seeded rows. That is sound. The conclusion drawn from it was not.
+
+`?scope=` was introduced defaulting to the seeded tier, which meant **search covered 4,863 of
+1,615,322 rows — 0.3% of the registry**. It went out in one deploy before being caught.
+
+The measurement supports *"sorting an unfiltered list of 1.6M rows is meaningless"*. It says
+nothing about search, and those are different operations: bm25 relevance is precisely the signal
+that is **not** degenerate across the corpus. Scoping search to the watched repos defeated the
+entire purpose of importing the other 99.7%.
+
+Two things to carry forward:
+
+- **A measurement about ordering is not a measurement about retrieval.** The degeneracy finding
+  justifies replacing an unfiltered listing with category strips. It never justified narrowing
+  what a query can reach.
+- **"Curated" was a loaded name for an accident.** Those 4,863 rows are not editorially
+  selected — they are whatever was in the 17 repos on the watch list. Naming them "curated"
+  made a privileged default sound principled. The parameter now takes the column's own values
+  (`seeded` / `imported` / `published`) and defaults to unset.
+
+The category strips still work unscoped, because rows carrying signal sort to the top on their
+own — which is also why the original scoping bought nothing that mattered.

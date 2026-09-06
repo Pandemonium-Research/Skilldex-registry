@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { validateSkill } from "../../src/validator/index.js";
 import { allSchemaStatements } from "../lib/schema.js";
+import { loadDelistings } from "../../src/db/delistings.js";
 
 const args = process.argv.slice(2);
 const flag = (name: string, fallback: string) => {
@@ -53,6 +54,26 @@ for (const s of statements) {
   await out.execute(s);
 }
 console.log(`schema applied to ${OUT} (${statements.length} statements, triggers deferred)\n`);
+
+// --- takedown tombstones ---------------------------------------------------
+// Loaded from the LIVE database, not from OUT — this build is a fresh file, so its own
+// delistings table is empty by construction. The live registry is where takedown requests are
+// recorded, and consulting it here is what stops a rebuild resurrecting removed content.
+// merge-live.ts copies the table across afterwards so the built database carries them too.
+const delistSource = process.env.TURSO_DATABASE_URL;
+if (!delistSource) {
+  console.warn(
+    "⚠ TURSO_DATABASE_URL is not set — building WITHOUT takedown tombstones.\n" +
+      "  Any delisted content in the source dataset will be re-imported. Do not ship this build.\n"
+  );
+}
+const delist = delistSource
+  ? await loadDelistings(
+      createClient({ url: delistSource, authToken: process.env.TURSO_AUTH_TOKEN })
+    )
+  : await loadDelistings(out);
+let delistedSkipped = 0;
+console.log(`${delist.size} delisting rule(s) in force\n`);
 
 // --- pass 1: naming --------------------------------------------------------
 const duckPath = join(dirname(OUT), "corpus-build.duckdb");
@@ -115,6 +136,14 @@ for (const shard of shards) {
       ? `https://github.com/${r.repo_full_name}/tree/HEAD/${dir}`
       : `https://github.com/${r.repo_full_name}`;
 
+
+    // Takedown tombstones are consulted at import time, so a rebuild cannot resurrect
+    // content someone asked to have removed. This is the guarantee that makes phase 7
+    // meaningful — without it a delisting survives only until the next corpus build.
+    if (delist.matches({ owner, repo: String(r.repo_full_name), name: String(r.final_slug) })) {
+      delistedSkipped++;
+      continue;
+    }
     batch.push({
       // `source` is set here, at INSERT time, rather than by a later UPDATE. Relabelling
       // 1.6M rows afterwards would fire skills_au per row and rewrite both FTS5 tables —
@@ -150,5 +179,6 @@ console.log(`  done in ${((Date.now() - t) / 1000).toFixed(0)}s`);
 const size = statSync(OUT).size;
 console.log(`\nwritten ${written.toLocaleString()} skills in ${((Date.now() - started) / 60000).toFixed(1)} min`);
 console.log(`score 0 (unparseable/invalid): ${scored0.toLocaleString()}`);
+console.log(`skipped by takedown rules: ${delistedSkipped.toLocaleString()}`);
 console.log(`file size: ${(size / 1e9).toFixed(2)} GB  — --from-file ceiling is 2 GB`);
 

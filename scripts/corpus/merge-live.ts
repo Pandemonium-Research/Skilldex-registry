@@ -134,6 +134,23 @@ for (const t of ["skills_fts", "skills_trgm"]) {
   console.log(`  ${t} integrity OK`);
 }
 
+// Carry takedown tombstones into the built database. build.ts consults the live registry while
+// importing, but the built file needs its own copy or the guarantee is lost the moment it
+// becomes the live database.
+const tomb = await live.execute("SELECT scope, value, reason, requested_by, created_at, removed FROM delistings");
+if (tomb.rows.length) {
+  await out.batch(
+    tomb.rows.map((r) => ({
+      sql: `INSERT INTO delistings (scope, value, reason, requested_by, created_at, removed)
+            VALUES (?,?,?,?,?,?)
+            ON CONFLICT (scope, value) DO NOTHING`,
+      args: [r.scope, r.value, r.reason, r.requested_by, r.created_at, r.removed],
+    })),
+    "write"
+  );
+}
+console.log(`carried ${tomb.rows.length} delisting rule(s) into the build`);
+
 // Load-bearing: build.ts writes the stats, then this script changes the row count. Without a
 // refresh here the uploaded database ships a headline count that is short by the merge delta.
 const stats = await refreshStats(out);

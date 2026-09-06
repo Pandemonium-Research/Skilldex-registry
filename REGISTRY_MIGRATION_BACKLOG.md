@@ -24,7 +24,7 @@ Effort figures are estimates, not commitments.
 | **4b** | Counting fix, curated split, browse redesign | 2d | ✅ **done and deployed** |
 | **5** | Freshness #1+2 — repo SHA polling, compare diffs | 1.5d | ⬜ |
 | **6** | Freshness #4+5 — verify-on-read, priority queue | 1d | ⬜ |
-| **7** | Opt-out / takedown path | 1d | ⬜ 🔒 gates the corpus going live |
+| **7** | Opt-out / takedown path | 1d | ✅ **done** — was the gate on the corpus going live |
 | **8** | Realign the nightly seeder with the imported corpus | 1–1.5d | ⬜ |
 
 ---
@@ -278,12 +278,30 @@ D15–D17; measurements in FINDINGS §5–§8; background in
 
 ---
 
-## Phase 7 — Opt-out / takedown
+## Phase 7 — Opt-out / takedown ✅
 
-- [ ] `delisted` flag honoured by both search and install — an inert flag is worse than none
-- [ ] Documented request route
-- [ ] Decide the granularity: per-skill, per-repo or per-owner
-- [ ] Guarantee a re-import cannot resurrect a de-listed entry
+Decision D18. The `delisted` flag was rejected in favour of deleting the row — see the
+reasoning there, which is this section's own "inert flag" warning taken seriously.
+
+- [x] ~~`delisted` flag honoured by both search and install~~ — **rows are deleted instead**, so
+      search, install, detail and stats honour a takedown without any of them being changed.
+      Tested negatively: after a delisting the ordinary endpoints return nothing, and none of
+      them knows delistings exist
+- [x] Documented request route — [OPT_OUT.md](OPT_OUT.md), written for the person asking rather
+      than for us: what we need, what happens, and explicitly what it does *not* do (it does not
+      touch their GitHub repo, and it cannot reach the independently-published GitSkills dataset)
+- [x] Granularity: **all three** — owner, repo, skill. Owner is the request that actually
+      arrives; repo matches how the corpus is shaped; skill covers the single-file case
+- [x] Re-import cannot resurrect. `scripts/seed.ts` and `scripts/corpus/build.ts` consult the
+      tombstones before inserting, `merge-live.ts` copies them into a built database, and
+      `POST /v1/skills` refuses to publish into a delisted namespace
+- [x] Migration `003_delistings.sql`, applied to the live database
+- [x] `scripts/delist.ts` with `preview` / `add` / `list` / `remove`; `add` refreshes the counts
+- [x] 12 tests, including that a repo-scope rule for `acme/my_repo` does **not** also remove
+      `acme/myXrepo` — `_` is a LIKE wildcard, and a LIKE-based matcher would have
+
+**Still open before the corpus goes live:** nothing in this phase. The remaining gate is
+freshness (phases 5–6) and the seeder realignment in phase 8.
 
 **Gate.** [BACKLOG.md](BACKLOG.md) places this *before* the imported corpus becomes publicly
 searchable. The corpus spans accounts that never opted in, and importing the full set rather

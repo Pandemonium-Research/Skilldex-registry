@@ -139,24 +139,31 @@ describe("searchSkills — counting", () => {
   });
 });
 
-describe("searchSkills — scope", () => {
+describe("searchSkills — provenance filter", () => {
   beforeEach(async () => {
     for (let i = 0; i < 3; i++) await insertSkill(i, { source: "seeded" });
     for (let i = 10; i < 20; i++) await insertSkill(i, { source: "imported" });
   });
 
-  it("defaults to the curated tier, excluding imported rows", async () => {
+  it("searches the whole registry by default", async () => {
+    // Not the seeded tier. Defaulting to it would hide 99.7% of the registry from search,
+    // which is the opposite of why the corpus was imported.
     const r = await searchSkills(query({}));
-    expect(r.total).toBe(3);
+    expect(r.total).toBe(13);
     expect(r.total_relation).toBe("eq");
   });
 
-  it("scope=all includes the corpus", async () => {
-    const r = await searchSkills(query({ scope: "all" }));
-    expect(r.total).toBe(13);
+  it("source=seeded narrows to the watched repos", async () => {
+    const r = await searchSkills(query({ source: "seeded" }));
+    expect(r.total).toBe(3);
   });
 
-  it("scope=all with no filters reads the precomputed stat rather than counting", async () => {
+  it("source=imported narrows to the corpus", async () => {
+    const r = await searchSkills(query({ source: "imported" }));
+    expect(r.total).toBe(10);
+  });
+
+  it("an unfiltered search reads the precomputed stat rather than counting", async () => {
     await refreshStats(db as any);
     // A deliberately wrong stat proves the value came from registry_stats and not a count.
     await db.execute({
@@ -164,7 +171,7 @@ describe("searchSkills — scope", () => {
       args: [999_999],
     });
 
-    const r = await searchSkills(query({ scope: "all" }));
+    const r = await searchSkills(query({}));
     expect(r.total).toBe(999_999);
     expect(r.total_relation).toBe("eq");
   });
@@ -172,7 +179,7 @@ describe("searchSkills — scope", () => {
   it("falls back to a bounded count when the stat row is missing", async () => {
     // No refreshStats() — registry_stats is empty. Must degrade to the real count, never to
     // count(*), and never throw.
-    const r = await searchSkills(query({ scope: "all" }));
+    const r = await searchSkills(query({}));
     expect(r.total).toBe(13);
     expect(r.total_relation).toBe("eq");
   });

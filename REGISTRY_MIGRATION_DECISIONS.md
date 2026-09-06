@@ -470,13 +470,31 @@ So sorting the whole corpus is meaningless, and the only non-degenerate ranking 
 a query.
 
 **Decision.** Add `source TEXT NOT NULL DEFAULT 'seeded' CHECK (source IN ('seeded',
-'imported', 'published'))` and split the registry in two: a curated tier that is browsable,
-exactly countable and meaningfully ordered, and the full index reachable by search. `scope`
-defaults to `curated`, so every existing caller — including published CLI builds — keeps
-getting the small, useful set.
+'imported', 'published'))`, exposed as an optional `?source=` filter.
 
-This is what makes D15 cheap in the common case: the default listing filters to ~4,863 rows,
-which is fast *and* exactly countable, so the cap only ever binds on a full-index search.
+### Revision, 2026-09-06 — the filter must not be defaulted
+
+As first shipped this defaulted to the seeded tier, on the reasoning above. **That was wrong,
+and it was live for one deploy.**
+
+The measurement supports "sorting an unfiltered list of 1.6M rows is meaningless". It does not
+support "search should be scoped", and those are different operations. bm25 ranks perfectly
+well across the whole corpus — relevance is the one signal that is *not* degenerate. Defaulting
+the filter meant `/v1/skills?q=…` searched 4,863 of 1,615,322 rows, i.e. 0.3% of the registry,
+which defeats the entire point of importing the other 99.7%.
+
+"Curated" was also the wrong word. Those 4,863 rows are not editorially selected; they are
+whatever happened to be in the 17 repos on the watch list. The parameter now takes the column's
+own values (`seeded` / `imported` / `published`), which are factual, and defaults to unset.
+
+**What this costs.** D15's cheap path no longer applies to the default listing. It does not need
+to: an unfiltered listing reads the precomputed total in O(1), and the page itself is a top-20
+index walk. The bounded count only binds on a filtered query, which is where it belongs.
+
+**Where the split still earns its keep.** The landing page's category strips — verified, most
+installed, recently added — read the whole registry and work anyway, because the rows carrying
+signal sort to the top on their own. `source` remains available as a filter, and the partial
+indexes still serve a seeded-scoped browse from ~4.8k entries when one is asked for.
 
 **Why a column and not `content_key IS NULL`.** That test is correct today only because
 `seed.ts` happens not to set `content_key`. It is an accident of the import, not a stated
@@ -516,6 +534,43 @@ error, so the directory is renamed rather than added alongside.
 
 **What would reverse this.** Only making the corpus browsable in a way that is genuinely
 useful, which requires ordering signal that does not exist.
+
+---
+
+## D18 — Takedown removes the row; it does not flag it
+
+Phase 7, and the gate on the imported corpus becoming publicly searchable. The corpus spans
+158,915 GitHub accounts, essentially none of which submitted anything to Skilldex.
+
+The obvious design is `delisted INTEGER NOT NULL DEFAULT 0` plus a filter. The backlog's own
+line on it is the argument against: *"an inert flag is worse than none."* A flag has to be
+remembered by `searchSkills`, `searchSkillsets`, `getSkill`, `getSkillByBareName`,
+`incrementInstallCount`, `refreshStats`, the sitemap, and every read path written afterwards.
+One missed filter silently republishes content someone asked to have removed, and nothing fails
+loudly when that happens.
+
+**Decision.** A `delistings` table is the authoritative record, and matching rows are **deleted**
+from `skills`. Search, install and every future query honour a takedown for free, because there
+is nothing left to honour. Three scopes — owner, repo, skill — because "remove everything of
+mine" is the request that actually arrives, while repo matches how the corpus is shaped and
+skill handles the single-file case.
+
+**The tombstone is what makes it stick.** Deleting rows alone would last exactly until the next
+corpus rebuild. `scripts/seed.ts` and `scripts/corpus/build.ts` both consult the table before
+inserting, `scripts/corpus/merge-live.ts` copies it into a freshly built database, and
+`POST /v1/skills` refuses to publish into a delisted namespace so the rule cannot be undone by
+accident.
+
+**Repo matching uses a prefix comparison, not LIKE.** `_` is a LIKE single-character wildcard,
+so a takedown for `acme/my_repo` would also match `acme/myXrepo` and remove an unrelated
+repository. Comparing a substring of equal length is exact and needs no ESCAPE clause.
+
+**What it costs.** Install counts do not survive a re-listing — the row carrying them was
+deleted. That is the acknowledged price of a guarantee that cannot be forgotten, and re-listing
+is rare.
+
+**What would reverse this.** A need to restore delisted content with its history intact, which
+would mean an archive table rather than a flag — the flag design does not become correct.
 
 ---
 

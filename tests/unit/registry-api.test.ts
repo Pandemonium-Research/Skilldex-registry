@@ -78,15 +78,15 @@ describe("GET /v1/skills", () => {
     expect(body.skills[0].qualified_name).toBe("anthropics/pdf");
   });
 
-  it("defaults to the curated tier", async () => {
+  it("searches the whole registry by default, and filters by provenance on request", async () => {
     await insert(1, { source: "seeded" });
     for (let i = 10; i < 15; i++) await insert(i, { source: "imported" });
 
-    const curated = (await (await app.request("/v1/skills")).json()) as any;
-    expect(curated.total).toBe(1);
-
-    const all = (await (await app.request("/v1/skills?scope=all")).json()) as any;
+    const all = (await (await app.request("/v1/skills")).json()) as any;
     expect(all.total).toBe(6);
+
+    const seeded = (await (await app.request("/v1/skills?source=seeded")).json()) as any;
+    expect(seeded.total).toBe(1);
   });
 
   it("sets has_more and never leaks the limit+1 probe row", async () => {

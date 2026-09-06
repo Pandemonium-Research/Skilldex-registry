@@ -19,6 +19,7 @@ import { fetchSkillFromGitHub } from "../src/github/fetch.js";
 import { validateSkill } from "../src/validator/index.js";
 import { slugifySkillName } from "../src/types/skill.js";
 import { refreshStats, refreshTagCounts } from "../src/db/stats.js";
+import { loadDelistings } from "../src/db/delistings.js";
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
@@ -232,6 +233,13 @@ async function seed() {
   // 4. Known urls are loaded per repo, inside the loop below — see knownUrlsForRepo.
   //    There is deliberately no global preload any more.
 
+  // 4b. Takedown tombstones. Loaded once and matched in memory: this is checked per candidate
+  //     skill, so it cannot be a query per row. A delisting must survive re-seeding — the
+  //     whole point is that the content does not come back — so this guard is what makes the
+  //     tombstone binding rather than decorative. See schema/sqlite/003_delistings.sql.
+  const delisted = await loadDelistings(db);
+  if (delisted.size > 0) console.log(`Loaded ${delisted.size} delisting rule(s)`);
+
   /**
    * Record a url this run has settled, so no future run fetches it again.
    *
@@ -270,6 +278,12 @@ async function seed() {
       }
     })();
     const watchedId = String(watched.id);
+
+    if (delisted.matches({ owner, repo: `${owner}/${repo}` , name: "" })) {
+      console.log(`Skipping ${owner}/${repo} — delisted`);
+      await markScanned(watchedId);
+      continue;
+    }
 
     console.log(`Scanning ${owner}/${repo} [${trust_tier}]...`);
 
@@ -319,6 +333,15 @@ async function seed() {
           metadata.name,
           createHash("sha256").update(sourceUrl).digest("hex")
         );
+
+        // Skill-level tombstone. The repo-level check above cannot see this, because the name
+        // is only known once the SKILL.md has been parsed.
+        if (delisted.matches({ owner, repo: `${owner}/${repo}`, name: slug })) {
+          console.log(`  ⊘ ${owner}/${slug}: delisted`);
+          totalSkipped++;
+          await markSeen(sourceUrl, blobSha, known);
+          continue;
+        }
 
         const inserted = await db.execute({
           sql: `INSERT INTO skills
