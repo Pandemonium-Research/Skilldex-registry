@@ -216,6 +216,12 @@ CREATE TABLE watched_repos (
 -- Transient failures must NEVER be recorded here; see scripts/seed.ts markSeen().
 CREATE TABLE seen_source_urls (
   url        TEXT PRIMARY KEY,
+  -- Blob sha of the SKILL.md that was settled here, taken from the tree response that
+  -- discovery already makes. Without it a parse failure blacklists the url permanently, so an
+  -- author who later fixes their YAML is never noticed; with it, a run retries precisely when
+  -- the contents change. Null on rows recorded before this column existed — those keep the old
+  -- skip-forever behaviour rather than triggering a re-fetch of everything ever settled.
+  blob_sha   TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ) WITHOUT ROWID;
 

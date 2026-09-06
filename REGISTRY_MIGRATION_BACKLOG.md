@@ -108,12 +108,14 @@ That file's `INSERT` is stale: it lists four repos on `main`, but production now
       `src/**/*`, which is why a syntax error in `seed.ts` passed `npm run typecheck` and only
       appeared when the seeder ran. Six errors surfaced, including `rescore.ts` declaring a
       `SkillRow` without `owner` while using `skill.owner`
-- [ ] ⚠ **Retry-on-change for parse failures.** Recording a PARSE_FAILED url in
-      `seen_source_urls` blacklists it forever, so a SKILL.md whose author later fixes the YAML
-      is never reconsidered. The earlier fix replaced "retried forever" with "never retried".
-      Store the failing blob sha — `discoverSkillPaths` already receives it from the tree API
-      and throws it away — and retry only when it changes. No extra API calls
-- [ ] Re-enable the nightly workflow once retry-on-change lands
+- [x] ⚠ **Retry-on-change for parse failures.** `seen_source_urls.blob_sha` records the sha
+      of the SKILL.md that was settled, taken from the tree response discovery already makes.
+      A url is refetched precisely when its contents change, so an author who fixes their YAML
+      is noticed — without the permanent blacklist the previous fix created
+- [x] Baseline adoption for rows predating the column: discovery knows the current sha, so
+      5,604 unversioned rows were given one with no GitHub requests. Idempotent — a second run
+      adopts nothing. The remaining 5,328 are paths that no longer exist upstream
+- [ ] Re-enable the nightly workflow
 
 **Why this is before the import.** Today the seeder loads *every* known URL into an in-memory
 `Set` on every run. At 1.61M skills plus seen URLs that is ~3,200 paginated round trips and

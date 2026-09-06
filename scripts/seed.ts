@@ -43,11 +43,18 @@ function githubHeaders(): Record<string, string> {
   return headers;
 }
 
+/** A discovered SKILL.md: where it lives, and the sha of its current contents. */
+interface DiscoveredSkill {
+  url: string;
+  /** Blob sha from the tree response. Content identity, free — no extra request. */
+  sha: string;
+}
+
 async function discoverSkillPaths(
   owner: string,
   repo: string,
   branch: string
-): Promise<string[]> {
+): Promise<DiscoveredSkill[]> {
   const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
   const res = await fetch(url, { headers: githubHeaders() });
 
@@ -57,7 +64,7 @@ async function discoverSkillPaths(
   }
 
   const data = (await res.json()) as {
-    tree: Array<{ path: string; type: string }>;
+    tree: Array<{ path: string; type: string; sha: string }>;
     truncated?: boolean;
   };
 
@@ -69,7 +76,10 @@ async function discoverSkillPaths(
     .filter((f) => f.type === "blob" && f.path.endsWith("/SKILL.md"))
     .map((f) => {
       const dir = f.path.replace("/SKILL.md", "");
-      return `https://github.com/${owner}/${repo}/tree/${branch}/${dir}`;
+      return {
+        url: `https://github.com/${owner}/${repo}/tree/${branch}/${dir}`,
+        sha: f.sha,
+      };
     });
 }
 
@@ -84,8 +94,11 @@ async function discoverSkillPaths(
  * A failure here costs GitHub quota rather than correctness — a url wrongly believed new is
  * re-fetched and then written as a no-op — so it is reported and the scan continues.
  */
-async function knownUrlsForRepo(owner: string, repo: string): Promise<Set<string>> {
+type KnownUrls = Map<string, { ingested: boolean; sha: string | null }>;
+
+async function knownUrlsForRepo(owner: string, repo: string): Promise<KnownUrls> {
   const prefix = likePrefix(`https://github.com/${owner}/${repo}/`);
+  const known: KnownUrls = new Map();
   try {
     const [inserted, seen] = await Promise.all([
       db.execute({
@@ -93,15 +106,72 @@ async function knownUrlsForRepo(owner: string, repo: string): Promise<Set<string
         args: [prefix],
       }),
       db.execute({
-        sql: "SELECT url AS u FROM seen_source_urls WHERE url LIKE ? ESCAPE '\\'",
+        sql: "SELECT url AS u, blob_sha AS s FROM seen_source_urls WHERE url LIKE ? ESCAPE '\\'",
         args: [prefix],
       }),
     ]);
-    return new Set([...inserted.rows, ...seen.rows].map((r) => String(r.u)));
+    for (const r of inserted.rows) known.set(String(r.u), { ingested: true, sha: null });
+    for (const r of seen.rows) {
+      if (known.has(String(r.u))) continue; // an ingested skill wins over a stale seen row
+      known.set(String(r.u), { ingested: false, sha: r.s == null ? null : String(r.s) });
+    }
+    return known;
   } catch (err: any) {
     console.error(`  Could not load known urls for ${owner}/${repo}: ${err.message}`);
-    return new Set();
+    return known;
   }
+}
+
+/**
+ * Should this discovered skill be fetched?
+ *
+ * Already ingested: no. Settled with the *same* contents: no. Settled with **different**
+ * contents: yes — the file has been edited since we gave up on it, and the edit may be the
+ * fix. That case is why `blob_sha` exists: recording a parse failure without it blacklists a
+ * url permanently, so an author who corrects their YAML is never noticed.
+ *
+ * Rows recorded before `blob_sha` existed carry null. Those are skipped *and* adopted — see
+ * adoptBaselineShas — so they gain a baseline without being re-fetched, and retry-on-change
+ * starts applying to them from the next run onwards.
+ */
+function shouldFetch(found: DiscoveredSkill, known: KnownUrls): boolean {
+  const prior = known.get(found.url);
+  if (!prior) return true;
+  if (prior.ingested) return false;
+  if (prior.sha === null) return false;
+  return prior.sha !== found.sha;
+}
+
+/**
+ * Give settled-but-shaless rows a baseline, without fetching anything.
+ *
+ * Rows recorded before `blob_sha` existed cannot be compared, so they would be skipped
+ * forever — the very blacklisting this column exists to end. Discovery already knows the
+ * current sha of every path, so adopting it costs a database write and no GitHub request.
+ *
+ * Adoption deliberately treats *today's* contents as the settled state: a file that was fixed
+ * before this ran is not re-examined, which is exactly the behaviour that already applied.
+ * From the next edit onwards it is.
+ */
+async function adoptBaselineShas(found: DiscoveredSkill[], known: KnownUrls): Promise<void> {
+  const adopt = found.filter((f) => {
+    const prior = known.get(f.url);
+    return prior && !prior.ingested && prior.sha === null;
+  });
+  if (adopt.length === 0) return;
+
+  const CHUNK = 500;
+  for (let i = 0; i < adopt.length; i += CHUNK) {
+    await db.batch(
+      adopt.slice(i, i + CHUNK).map((f) => ({
+        sql: "UPDATE seen_source_urls SET blob_sha = ? WHERE url = ? AND blob_sha IS NULL",
+        args: [f.sha, f.url],
+      })),
+      "write"
+    );
+  }
+  for (const f of adopt) known.set(f.url, { ingested: false, sha: f.sha });
+  console.log(`  adopted a baseline sha for ${adopt.length} previously unversioned url(s)`);
 }
 
 /** Stamp a watched repo as scanned, whether or not it produced anything. */
@@ -160,12 +230,15 @@ async function seed() {
    * rate limit, a database error — must never be recorded, or one bad night would drop a
    * real skill from the registry permanently.
    */
-  const markSeen = async (url: string, known: Set<string>) => {
+  const markSeen = async (url: string, sha: string, known: KnownUrls) => {
+    // DO UPDATE, not OR IGNORE: a url retried after an edit and still broken must record its
+    // *new* sha, or it would be retried on every subsequent run.
     await db.execute({
-      sql: "INSERT OR IGNORE INTO seen_source_urls (url) VALUES (?)",
-      args: [url],
+      sql: `INSERT INTO seen_source_urls (url, blob_sha) VALUES (?, ?)
+            ON CONFLICT (url) DO UPDATE SET blob_sha = excluded.blob_sha`,
+      args: [url, sha],
     });
-    known.add(url); // keep the local set in step so this run skips it too
+    known.set(url, { ingested: false, sha }); // keep the local map in step
   };
 
   // 5. Process each repo
@@ -193,10 +266,14 @@ async function seed() {
     // Scoped to this repo, not the whole registry — see knownUrlsForRepo.
     const known = await knownUrlsForRepo(owner, repo);
     const allPaths = await discoverSkillPaths(owner, repo, branch);
-    const newPaths = allPaths.filter((p) => !known.has(p));
+    await adoptBaselineShas(allPaths, known);
+    const newPaths = allPaths.filter((p) => shouldFetch(p, known));
+    const changed = newPaths.filter((p) => known.has(p.url)).length;
 
     console.log(
-      `  ${allPaths.length} skills found, ${newPaths.length} new (${known.size} already known here)`
+      `  ${allPaths.length} skills found, ${newPaths.length} to fetch` +
+        `${changed ? ` (${changed} changed since last settled)` : ""}` +
+        ` (${known.size} already known here)`
     );
 
     if (newPaths.length === 0) {
@@ -206,7 +283,7 @@ async function seed() {
       continue;
     }
 
-    for (const sourceUrl of newPaths) {
+    for (const { url: sourceUrl, sha: blobSha } of newPaths) {
       await sleep(DELAY_MS);
 
       try {
@@ -215,7 +292,7 @@ async function seed() {
         if (!metadata.name) {
           console.log(`  ✗ Skipped (no name): ${sourceUrl}`);
           totalFailed++;
-          await markSeen(sourceUrl, known); // parsed, and has no name; it will not grow one
+          await markSeen(sourceUrl, blobSha, known); // parsed, and has no name today
           continue;
         }
 
@@ -259,11 +336,11 @@ async function seed() {
         if (inserted.rows.length === 0) {
           console.log(`  ~ ${metadata.name} (name conflict, skipped)`);
           totalSkipped++;
-          await markSeen(sourceUrl, known);
+          await markSeen(sourceUrl, blobSha, known);
         } else {
           console.log(`  ✓ ${metadata.name} (score: ${validation.score})`);
           totalInserted++;
-          known.add(sourceUrl); // keep local set in sync
+          known.set(sourceUrl, { ingested: true, sha: blobSha }); // keep local map in sync
         }
       } catch (err: any) {
         console.log(`  ✗ ${sourceUrl}: ${err.message}`);
@@ -271,7 +348,7 @@ async function seed() {
         // PARSE_FAILED is a property of the file, not of this run: the same SKILL.md
         // parses the same way tomorrow. Every other error (FETCH_FAILED, aborts, 5xx)
         // may well succeed next time, so those are deliberately left to be retried.
-        if (err?.code === "PARSE_FAILED") await markSeen(sourceUrl, known);
+        if (err?.code === "PARSE_FAILED") await markSeen(sourceUrl, blobSha, known);
       }
     }
 
