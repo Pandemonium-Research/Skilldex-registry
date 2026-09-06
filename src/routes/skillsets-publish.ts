@@ -62,12 +62,17 @@ skillsetsPublishRoutes.post("/", requireAuth, async (c) => {
   // Store in database
   const skillset = await createSkillset({
     name: parsed.data.name,
-    description: metadata.description,
+    // `|| metadata.name` matches the skill path and scripts/seed.ts.
+    description: metadata.description || metadata.name || parsed.data.name,
     author: metadata.author ?? publisher.github_handle,
     source_url: parsed.data.source_url,
     trust_tier: "community",
     score: validation.score,
-    spec_version: metadata.spec_version,
+    // The column is NOT NULL, so an omitted spec_version would fail the insert rather
+    // than the validation. Stays "1.0" until the registry computes coherence: skillset
+    // spec 1.1 IS the coherence revision (skilldex fdf9560 bumped it alongside
+    // skillset-coherence.ts), so claiming 1.1 without computing it would be a lie.
+    spec_version: metadata.spec_version ?? "1.0",
     tags: parsed.data.tags ?? null,
     skill_refs: metadata.skillRefs,
     published_by: publisher.id,
@@ -121,10 +126,12 @@ skillsetsPublishRoutes.patch("/:name", requireAuth, async (c) => {
     ),
   });
 
+  // Same fallback and default as the POST path — a re-fetch must not blank a description
+  // or null a NOT NULL column that the original insert populated.
   const updated = await updateSkillset(name, {
-    description: metadata.description,
+    description: metadata.description || metadata.name || existing.description,
     score: validation.score,
-    spec_version: metadata.spec_version,
+    spec_version: metadata.spec_version ?? existing.spec_version ?? "1.0",
     skill_refs: metadata.skillRefs,
   });
 

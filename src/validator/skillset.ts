@@ -142,7 +142,11 @@ export function validateSkillset(input: SkillsetValidatorInput): SkillsetValidat
 // --- Helpers ---
 
 function extractFrontmatter(content: string): string | null {
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  // \r? on both delimiters: a SKILLSET.md authored on Windows opens with "---\r\n", which a
+  // bare \n pattern does not match. Such a file is reported as having no frontmatter at all
+  // and scores 0, even though its YAML is well-formed. Mirrors the skill-side fix in
+  // 5739c69, which corrected two of the four copies of this helper but not the skillset pair.
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   return match ? match[1] : null;
 }
 

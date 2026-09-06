@@ -170,7 +170,10 @@ async function fetchDirectoryListing(
 }
 
 function extractFrontmatter(content: string): string | null {
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  // \r? on both delimiters — see the note in ../validator/skillset.ts. A Windows-authored
+  // SKILLSET.md would otherwise be rejected here with UNPROCESSABLE before it ever reached
+  // the validator.
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   return match ? match[1] : null;
 }
 

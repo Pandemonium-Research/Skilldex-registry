@@ -116,6 +116,23 @@ describe("validateSkillset — scoring", () => {
     );
     expect(result.score).toBe(PERFECT);
   });
+
+  // The skill path got this fix in 5739c69, which corrected two of the four copies of
+  // extractFrontmatter but not the skillset pair — so a Windows-authored SKILLSET.md was
+  // still reported as having no frontmatter and scored 0. Built in memory rather than as a
+  // fixture: git's autocrlf would rewrite a committed file and the test would stop testing.
+  it("scores a CRLF skillset exactly as it scores the same skillset with LF", () => {
+    const lf = skillsetMd();
+    const crlf = lf.replace(/\n/g, "\r\n");
+    expect(crlf).toContain("---\r\n"); // guard: the variant really is CRLF
+
+    const lfResult = validateSkillset(input({ skillsetMd: lf }));
+    const crlfResult = validateSkillset(input({ skillsetMd: crlf }));
+
+    expect(crlfResult.score).toBe(lfResult.score);
+    expect(crlfResult.diagnostics).toEqual(lfResult.diagnostics);
+    expect(crlfResult.score).toBe(PERFECT);
+  });
 });
 
 describe("validateSkillset — a missing field forfeits its dependent checks", () => {
