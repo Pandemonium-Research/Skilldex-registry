@@ -18,7 +18,8 @@
     "rescore": "tsx --env-file=.env scripts/rescore.ts",
     "preflight:005": "tsx --env-file=.env scripts/preflight-005.ts",
     "typecheck": "tsc --noEmit",
-    "migrate:turso": "tsx --env-file=.env scripts/migrate-to-turso.ts"
+    "migrate:turso": "tsx --env-file=.env scripts/migrate-to-turso.ts",
+    "parity:api": "tsx --env-file=.env scripts/verify-api-parity.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.8",

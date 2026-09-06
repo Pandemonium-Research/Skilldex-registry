@@ -78,6 +78,12 @@ That file's `INSERT` is stale: it lists four repos on `main`, but production now
       `GITHUB_CLIENT_SECRET` are already in `.env.example`, so this may be half-configured
 - [ ] Switch Vercel env vars at cutover; **leave `SUPABASE_*` in place** so rollback is one
       variable, not a scramble
+- [ ] ⚠ **Do not deploy the Turso-backed API while the nightly seeder still writes to
+      Supabase.** `src/` is fully ported, but `scripts/seed.ts`, `rescore.ts` and
+      `add-repo.ts` still use `@supabase/supabase-js`. Deploying now would split the brain:
+      the seeder inserts into Supabase and the API reads Turso, so new skills would never
+      appear. Either disable the nightly workflow for the transition, or hold the deploy
+      until phase 8 ports the seeder
 - [ ] Update `.github/workflows/nightly-seed.yml` to pass the Turso vars
 
 ---

@@ -1,152 +1,160 @@
-import { getSupabase } from "./client.js";
+import { getDb } from "./client.js";
+import { toSkillsetRow, jsonOrNull } from "./rows.js";
+import { toFtsQuery } from "./skills.js";
 import type { SkillsetRow } from "../types/skillset.js";
 import type { SearchSkillsetsQuery } from "../types/skillset.js";
+import type { InArgs } from "@libsql/client";
 
-const SORT_MAP: Record<string, { column: string; ascending: boolean }> = {
-  installs: { column: "install_count", ascending: false },
-  score: { column: "score", ascending: false },
-  recent: { column: "published_at", ascending: false },
-  name: { column: "name", ascending: true },
+/** `seq` breaks ties so LIMIT/OFFSET paging is stable — see the note in skills.ts. */
+const SORT_MAP: Record<string, string> = {
+  installs: "s.install_count DESC, s.seq ASC",
+  score: "s.score DESC, s.seq ASC",
+  recent: "s.published_at DESC, s.seq ASC",
+  name: "s.name ASC, s.seq ASC",
 };
 
 export async function searchSkillsets(
   params: SearchSkillsetsQuery
 ): Promise<{ skillsets: SkillsetRow[]; total: number }> {
-  const supabase = getSupabase();
+  const db = getDb();
+  const where: string[] = [];
+  const args: InArgs = [];
 
-  let query = supabase.from("skillsets").select("*", { count: "exact" });
-
-  if (params.q) {
-    query = query.textSearch("name, description", params.q, {
-      type: "websearch",
-      config: "english",
-    });
+  let from = "skillsets s";
+  const fts = params.q ? toFtsQuery(params.q) : null;
+  if (fts) {
+    from = "skillsets s JOIN skillsets_fts f ON f.rowid = s.seq";
+    where.push("skillsets_fts MATCH ?");
+    args.push(fts);
   }
 
   if (params.tier) {
-    query = query.eq("trust_tier", params.tier);
+    where.push("s.trust_tier = ?");
+    args.push(params.tier);
   }
 
   if (params.min_score !== undefined) {
-    query = query.gte("score", params.min_score);
+    where.push("s.score >= ?");
+    args.push(params.min_score);
   }
 
   if (params.spec_version) {
-    query = query.eq("spec_version", params.spec_version);
+    where.push("s.spec_version = ?");
+    args.push(params.spec_version);
   }
 
   if (params.tags) {
-    const tagList = params.tags.split(",").map((t) => t.trim());
-    query = query.overlaps("tags", tagList);
+    const tagList = params.tags.split(",").map((t) => t.trim()).filter(Boolean);
+    if (tagList.length) {
+      where.push(
+        `EXISTS (SELECT 1 FROM json_each(s.tags) WHERE value IN (${tagList
+          .map(() => "?")
+          .join(", ")}))`
+      );
+      args.push(...tagList);
+    }
   }
 
-  const sort = SORT_MAP[params.sort] ?? SORT_MAP.installs;
-  query = query.order(sort.column, { ascending: sort.ascending });
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const orderSql = SORT_MAP[params.sort] ?? SORT_MAP.installs;
 
-  query = query.range(params.offset, params.offset + params.limit - 1);
-
-  const { data, error, count } = await query;
-
-  if (error) {
-    throw new Error(`Database query failed: ${error.message}`);
-  }
+  const result = await db.execute({
+    sql: `SELECT s.*, count(*) OVER () AS __total
+          FROM ${from} ${whereSql}
+          ORDER BY ${orderSql}
+          LIMIT ? OFFSET ?`,
+    args: [...args, params.limit, params.offset],
+  });
 
   return {
-    skillsets: (data ?? []) as SkillsetRow[],
-    total: count ?? 0,
+    skillsets: result.rows.map(toSkillsetRow),
+    total: result.rows.length ? Number(result.rows[0].__total) : 0,
   };
 }
 
 export async function getSkillsetByName(name: string): Promise<SkillsetRow | null> {
-  const supabase = getSupabase();
-
-  const { data, error } = await supabase
-    .from("skillsets")
-    .select("*")
-    .eq("name", name)
-    .single();
-
-  if (error) {
-    if (error.code === "PGRST116") return null;
-    throw new Error(`Database query failed: ${error.message}`);
-  }
-
-  return data as SkillsetRow;
+  const db = getDb();
+  const r = await db.execute({
+    sql: "SELECT * FROM skillsets WHERE name = ? LIMIT 1",
+    args: [name],
+  });
+  return r.rows.length ? toSkillsetRow(r.rows[0]) : null;
 }
 
 export async function incrementSkillsetInstallCount(name: string): Promise<SkillsetRow | null> {
-  const supabase = getSupabase();
-
-  const skillset = await getSkillsetByName(name);
-  if (!skillset) return null;
-
-  const { data, error } = await supabase
-    .from("skillsets")
-    .update({ install_count: skillset.install_count + 1 })
-    .eq("name", name)
-    .select("*")
-    .single();
-
-  if (error) {
-    throw new Error(`Failed to increment install count: ${error.message}`);
-  }
-
-  return data as SkillsetRow;
+  const db = getDb();
+  const r = await db.execute({
+    sql: "UPDATE skillsets SET install_count = install_count + 1 WHERE name = ? RETURNING *",
+    args: [name],
+  });
+  return r.rows.length ? toSkillsetRow(r.rows[0]) : null;
 }
 
 export async function createSkillset(
   skillset: Omit<SkillsetRow, "id" | "skill_count" | "install_count" | "published_at" | "updated_at">
 ): Promise<SkillsetRow> {
-  const supabase = getSupabase();
+  const db = getDb();
+  const id = crypto.randomUUID();
 
-  const { data, error } = await supabase
-    .from("skillsets")
-    .insert(skillset)
-    .select("*")
-    .single();
-
-  if (error) {
-    if (error.code === "23505") {
+  try {
+    // skill_count is a generated column and must not be written.
+    const r = await db.execute({
+      sql: `INSERT INTO skillsets
+              (id, name, description, author, source_url, trust_tier, score,
+               spec_version, tags, skill_refs, published_by)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            RETURNING *`,
+      args: [
+        id,
+        skillset.name,
+        skillset.description,
+        skillset.author,
+        skillset.source_url,
+        skillset.trust_tier,
+        skillset.score,
+        skillset.spec_version,
+        jsonOrNull(skillset.tags),
+        JSON.stringify(skillset.skill_refs ?? []),
+        skillset.published_by,
+      ],
+    });
+    return toSkillsetRow(r.rows[0]);
+  } catch (err: any) {
+    if (/UNIQUE constraint failed/i.test(err?.message ?? "")) {
       throw Object.assign(new Error("Skillset name already exists"), { code: "CONFLICT" });
     }
-    throw new Error(`Failed to create skillset: ${error.message}`);
+    throw err;
   }
-
-  return data as SkillsetRow;
 }
 
 export async function updateSkillset(
   name: string,
   updates: Partial<Pick<SkillsetRow, "description" | "score" | "spec_version" | "tags" | "source_url" | "skill_refs">>
 ): Promise<SkillsetRow | null> {
-  const supabase = getSupabase();
+  const db = getDb();
 
-  const { data, error } = await supabase
-    .from("skillsets")
-    .update({ ...updates, updated_at: new Date().toISOString() })
-    .eq("name", name)
-    .select("*")
-    .single();
-
-  if (error) {
-    if (error.code === "PGRST116") return null;
-    throw new Error(`Failed to update skillset: ${error.message}`);
+  const sets: string[] = [];
+  const args: InArgs = [];
+  for (const [k, v] of Object.entries(updates)) {
+    if (v === undefined) continue;
+    sets.push(`${k} = ?`);
+    if (k === "tags") args.push(jsonOrNull(v as string[] | null));
+    else if (k === "skill_refs") args.push(JSON.stringify(v));
+    else args.push(v as any);
   }
+  sets.push("updated_at = ?");
+  args.push(new Date().toISOString());
 
-  return data as SkillsetRow;
+  const r = await db.execute({
+    sql: `UPDATE skillsets SET ${sets.join(", ")} WHERE name = ? RETURNING *`,
+    args: [...args, name],
+  });
+
+  return r.rows.length ? toSkillsetRow(r.rows[0]) : null;
 }
 
 export async function deleteSkillset(name: string): Promise<boolean> {
-  const supabase = getSupabase();
-
-  const { error, count } = await supabase
-    .from("skillsets")
-    .delete({ count: "exact" })
-    .eq("name", name);
-
-  if (error) {
-    throw new Error(`Failed to delete skillset: ${error.message}`);
-  }
-
-  return (count ?? 0) > 0;
+  const db = getDb();
+  const r = await db.execute({ sql: "DELETE FROM skillsets WHERE name = ?", args: [name] });
+  return r.rowsAffected > 0;
 }

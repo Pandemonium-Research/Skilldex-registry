@@ -1,18 +1,30 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { createClient, type Client } from "@libsql/client/web";
 
-let client: SupabaseClient | null = null;
+let client: Client | null = null;
 
-export function getSupabase(): SupabaseClient {
+/**
+ * The libSQL/Turso connection.
+ *
+ * Uses the `/web` entrypoint deliberately: it speaks HTTP rather than holding a socket, so
+ * there is no connection pool to exhaust from serverless functions. This is the one place
+ * where the move off Postgres is a straight win for this deployment.
+ */
+export function getDb(): Client {
   if (!client) {
-    const url = process.env.SUPABASE_URL;
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const url = process.env.TURSO_DATABASE_URL;
+    const authToken = process.env.TURSO_AUTH_TOKEN;
 
-    if (!url || !key) {
-      throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variables");
+    if (!url) {
+      throw new Error("Missing TURSO_DATABASE_URL environment variable");
     }
 
-    client = createClient(url, key);
+    client = createClient({ url, authToken });
   }
 
   return client;
+}
+
+/** Tests replace the client with one pointed at a scratch file. */
+export function __setDbForTesting(c: Client | null): void {
+  client = c;
 }
