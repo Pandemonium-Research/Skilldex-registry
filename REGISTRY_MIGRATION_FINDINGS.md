@@ -472,3 +472,184 @@ rebuilding the watched repos from the corpus.
 skill, maximum 1, 77% have none, 2 distinct values in the sample. This is why D8 defers the
 normalised tag table rather than building it; whether the *imported* corpus carries dense
 frontmatter tags is still unmeasured.
+
+---
+
+## 5. Counting at scale — phase 4b, 2026-09-06
+
+Full analysis and the literature behind it in
+[COUNTING_AT_SCALE.md](COUNTING_AT_SCALE.md); the design call is D15.
+
+Measured against `skilldex-registry-v2` (1,615,322 rows):
+
+| Query | Time |
+|---|---|
+| Default `/v1/skills` **with** `count(*) OVER ()` | **>90s, timed out** |
+| Same without it | 2.9s |
+| FTS search (`q=kubernetes`) | 6.4s |
+| Bounded count, cap 10,001 | **1.0s** |
+| Bounded count with a filter (true answer: 7) | 1.7s |
+
+**A scale-only failure.** Invisible at 4,863 rows, and no parity check could have caught it —
+the same class as the PostgREST truncation in §1c: correct at small N, wrong at large N, silent
+in both cases.
+
+### The 2.9s is network, not the query
+
+`EXPLAIN QUERY PLAN` and local timings against `build/registry.db`:
+
+| Query | Plan | Local time |
+|---|---|---|
+| Listing **with** the window function | `SCAN s` + `USE TEMP B-TREE FOR ORDER BY` | — |
+| Listing **without** it | `SCAN s USING INDEX skills_install_count_idx` | **8 ms** |
+| Same at `OFFSET 10000` | as above | **1 ms** |
+| Bounded count | `SCAN s USING COVERING INDEX skills_score_idx` | **2 ms** |
+
+The index is used correctly once the window function is gone, and there is **no sort step**. So
+the 2.9s is Turso HTTP round-trip and cold remote page cache, not query cost.
+
+**This corrects an earlier hypothesis.** A design pass argued the 2.9s came from 1,610,459 rows
+tied at `install_count = 0` forcing a full materialise-and-sort, and recommended a composite
+`(install_count DESC, seq ASC)` index. The plan output above disproves it: SQLite stores rowid
+ascending within equal index keys and `seq` *is* the rowid, so `install_count DESC, seq ASC` is
+already satisfied by the existing index. **Do not add that index** — it would cost bytes
+against a 2 GB ceiling from which 192 MB was already cut, and buy nothing.
+
+Two consequences: response caching is worth more than query tuning here, and offset-based
+load-more is comfortably viable to the 10k cap.
+
+### Partial indexes for the curated tier, verified
+
+After migration 002:
+
+| Query | Plan |
+|---|---|
+| Curated default listing | `SCAN s USING INDEX skills_curated_installs_idx` |
+| Curated bounded count | same index |
+| Curated `sort=recent` | `SCAN s USING INDEX skills_curated_recent_idx` |
+| FTS count subquery (bm25 dropped) | `SCAN skills_fts VIRTUAL TABLE` + rowid lookup |
+
+No `USE TEMP B-TREE` anywhere. The default browse is a ~4.8k-entry index walk regardless of
+how large the corpus grows.
+
+---
+
+## 6. Signal distribution — why the corpus cannot be browsed
+
+The measurement behind D16. Taken on the merged build.
+
+| Dimension | Whole corpus | Curated tier |
+|---|---|---|
+| Rows | 1,615,322 | **4,863** |
+| `trust_tier = 'verified'` | 7 | **7 — all** |
+| `install_count > 0` | 33 | **33 — all** |
+| Tagged | 2,106 (0.13%) | **2,106 — all** |
+| Distinct `published_at` days | 51 | **51 — all** |
+| Distinct owners | 158,915 | 17 |
+
+`published_at` spread across the whole corpus:
+
+| Day | Rows |
+|---|---|
+| 2026-09-06 (import) | **1,610,488** |
+| 2026-09-04 | 1,646 |
+| everything else (49 days) | ~3,188 |
+
+Score bands: 90–100 → 1,345,829 (83%); 80–89 → 254,903; below 80 → 14,590.
+
+Top owners by skill count: `majiayu000` 31,523, `David-Li0406` 27,006, `Klotzkette` 21,957,
+`dvcrn` 20,306. Bulk uploaders — a "top owners" surface would showcase exactly the wrong thing.
+
+**Every ordering signal lives entirely in the curated tier.** The imported corpus contributes
+none of it, on any dimension.
+
+### This closes the open tags question from §4
+
+§4 recorded that "whether the *imported* corpus carries dense frontmatter tags is still
+unmeasured". It carries **none**: `scripts/corpus/build.ts` writes a literal `NULL` in the
+`tags` position for every corpus row, and all 2,106 tagged skills are curated. Tag density did
+not improve with the import — it got 300× sparser, which strengthens D8's deferral of the
+normalised tag table rather than weakening it.
+
+Live `tag_counts` after migration, for scale: 11 distinct tags, led by `terminal` (942),
+`composio` (842), `ai-research` (88). Few values, but real weight behind them.
+
+---
+
+## 7. Bugs found while implementing the browse redesign
+
+Recorded because each was silent and none was caught by a test.
+
+### `merge-live.ts` did not write `source` on the conflict path
+
+Its `ON CONFLICT (owner, name) DO UPDATE SET` listed every column except `source`, so a live
+row overwriting a corpus row would keep `source = 'imported'` and be excluded from the curated
+tier. That is the ~498 overlapping skills — the set *most* likely to be browsed, since a
+watched repo and the corpus both carry them. Fixed on both the insert and conflict paths.
+
+### The bulk-relabel trap
+
+The obvious migration is `ALTER TABLE ADD COLUMN source` then
+`UPDATE skills SET source='imported' WHERE content_key IS NOT NULL`. On the corpus that fires
+`skills_au` 1.6M times and rewrites both FTS5 tables. Avoided entirely: the live rows already
+default correctly (all 4,863 have `content_key IS NULL`), and `build.ts` sets `source` at
+INSERT time before the triggers exist. For patching an existing corpus DB, flip the default and
+update the small side — ~4.8k rows instead of 1.6M.
+
+`ALTER TABLE ADD COLUMN` with a constant default is a schema-only change in SQLite and does not
+rewrite rows, so the ALTER itself is O(1) at any table size. Only the UPDATE must be kept small.
+
+### Cache-Control set after `await next()` never reaches production
+
+A middleware setting `Cache-Control` after `await next()` works under Hono's in-process
+`app.request()` — **the test asserting it passed** — but the Vercel adapter reads the response
+before the mutation lands.
+
+Measured on the deployment: middleware-set routes returned Vercel's default
+`public, max-age=0, must-revalidate` with `x-vercel-cache: MISS` on every request, while
+`/v1/skills/:owner/:name`, which sets the same header *inside* its handler, returned
+`x-vercel-cache: HIT`. Only the detail route was actually being cached.
+
+Two things worth keeping:
+
+- **A passing test is not evidence a header reaches production.** Set response headers inside
+  the handler, on the success return — which also gates them, since a 400/404/409 never reaches
+  the line.
+- **`cache-control` in a Vercel response tells you nothing.** Vercel consumes `s-maxage` and
+  rewrites what it sends the browser to `public, max-age=0`. `x-vercel-cache` is the only real
+  signal.
+
+### `.gitignore` had two entries fused
+
+`ADMIN_CMDS.mdbuild/` — a missing newline merged two lines, so **neither** `ADMIN_CMDS.md` nor
+`build/` was ignored. `build/` was 3.1 GB of corpus artifacts sitting untracked-but-not-ignored,
+one `git add -A` from being committed. A standing reason to stage explicit paths.
+
+---
+
+## 8. Live state after the browse deploy, 2026-09-06
+
+Migration 002 applied to the live database; `npm run refresh-stats` populated the counts.
+
+| | |
+|---|---|
+| Skills | 4,863 — all `source = 'seeded'`, all curated |
+| Verified | 7 |
+| Owners | 17 |
+| Skillsets | 0 |
+| Distinct tags | 11 |
+
+Verified against the deployed API:
+
+| Check | Result |
+|---|---|
+| `/v1/stats` | O(1), returns the table above with `updated_at` |
+| `/v1/skills` envelope | `total_relation: "eq"`, `has_more`, `max_offset: 10000` |
+| `offset=99999` | 400 `OFFSET_TOO_LARGE` |
+| `tier=nonsense` | 400 `INVALID_PARAMS` with a `details` path |
+| Latency | ~0.30s across listing, search and stats |
+
+**Relevance ordering confirmed live.** `q=pdf` returns `TerminalSkills/pdf-analyzer`,
+`anthropics/pdf`, `ComposioHQ/pdf` — bm25-ranked, 55 exact results. This closes §1c's "still
+open: relevance is computed but unused": the web app was sending `sort=installs` on every
+search, overriding `resolveSort()` and ordering by a column that is 0 for all but 33 rows.

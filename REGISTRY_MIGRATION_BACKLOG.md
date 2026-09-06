@@ -20,10 +20,11 @@ Effort figures are estimates, not commitments.
 | **1** | Schema + migrate live rows + parity check | 1d | ✅ done |
 | **2** | Rewrite `src/db/*`; replace Supabase Auth | 2–3d | ✅ **done and deployed** |
 | **3** | Port `seed.ts` to Turso **and** kill the global preload | 1d | ✅ done |
-| **4** | Import the corpus | 2d | ⬜ |
+| **4** | Import the corpus | 2d | 🟡 built, merged, uploaded — **not cut over** |
+| **4b** | Counting fix, curated split, browse redesign | 2d | ✅ **done and deployed** |
 | **5** | Freshness #1+2 — repo SHA polling, compare diffs | 1.5d | ⬜ |
 | **6** | Freshness #4+5 — verify-on-read, priority queue | 1d | ⬜ |
-| **7** | Opt-out / takedown path | 1d | ⬜ |
+| **7** | Opt-out / takedown path | 1d | ⬜ 🔒 gates the corpus going live |
 | **8** | Realign the nightly seeder with the imported corpus | 1–1.5d | ⬜ |
 
 ---
@@ -125,7 +126,13 @@ the truncated preload already fixed in `d375723` — latent rather than absent.
 
 ---
 
-## Phase 4 — Import the corpus
+## Phase 4 — Import the corpus 🟡
+
+**Built, merged and uploaded to `skilldex-registry-v2`; nothing points at it.** Cutover is
+gated on phase 7, and the corpus database still needs `source` — either a rebuild (which now
+applies 002 automatically and sets `source` at INSERT time) or the default-flip patch
+documented at the foot of `schema/sqlite/002_source_and_stats.sql`.
+
 
 - [ ] `scripts/build-corpus.ts` — DuckDB over the Parquet mirror → one local SQLite file
 - [ ] Apply the format gates: `frontmatter_valid = 1` and filename = `SKILL.md`
@@ -178,6 +185,73 @@ the truncated preload already fixed in `d375723` — latent rather than absent.
       budget (16% of 10M/month) but is 3,200+ round trips and non-atomic — a failure leaves a
       half-imported registry
 - [ ] Re-verify the deployed API against the new database
+
+---
+
+## Phase 4b — Counting, the curated split, and the browse redesign ✅
+
+Unplanned. Timing real queries against the 1.6M build exposed a blocker that had to be fixed
+before cutover, and fixing it properly meant rethinking what the browse page shows. Decisions
+D15–D17; measurements in FINDINGS §5–§8; background in
+[COUNTING_AT_SCALE.md](COUNTING_AT_SCALE.md) and
+[REGISTRY_BROWSE_REDESIGN_PLAN.md](REGISTRY_BROWSE_REDESIGN_PLAN.md).
+
+**API** — `3dd1030`, `978ada5`, `7ef421b`
+
+- [x] Replace `count(*) OVER ()` in `searchSkills` **and** `searchSkillsets` — the skillsets
+      copy had the identical defect and had never been measured
+- [x] `src/db/pagination.ts` — `COUNT_CAP`, `MAX_OFFSET`, bounded count, `eq`/`gte`, `takePage`.
+      Only the pieces that must never diverge are shared; the SQL stays in each file
+- [x] Page + count in one `db.batch()`, so the fix stays one HTTP round trip
+- [x] Drop `bm25()` from the count subquery — the count needs no rank
+- [x] `has_more` from a `limit + 1` fetch
+- [x] Migration `002_source_and_stats.sql`: `source` column, two partial indexes,
+      `registry_stats`, `tag_counts`
+- [x] `scripts/migrate.ts` — the first real migration runner. Records 001 as already-in-effect
+      by detecting the `skills` table rather than trusting a flag
+- [x] `scripts/lib/schema.ts`; `build.ts` now applies **every** schema file, so a fresh
+      `--from-file` database cannot ship an older schema than production
+- [x] `GET /v1/stats` and `GET /v1/tags`, both O(1) table reads
+- [x] `scripts/refresh-stats.ts`, wired into `seed.ts` and `merge-live.ts`
+- [x] `offset` capped at `MAX_OFFSET`, with a distinguishable `OFFSET_TOO_LARGE`
+- [x] Cache-Control on GET reads — **in handlers, not middleware** (FINDINGS §7)
+- [x] `merge-live.ts` writes `source` on both insert and conflict paths
+- [x] Tests 71 → 102, against a real SQLite fixture through the Hono app. `COUNT_CAP` is
+      injectable so the `gte` branch is covered; it is otherwise production-only
+
+**Web** — `c0f8dee`
+
+- [x] Stop sending `sort=installs` on every search — this alone made bm25 reachable from the
+      site for the first time; "Best match" added to the dropdown
+- [x] `/registry/[owner]/[name]`; `[name]` **renamed** to `[owner]` (coexisting is a build
+      error) and repurposed as a resolver that redirects or disambiguates
+- [x] `resolveBareName` distinguishes 409 from 404 — contested names were rendering as "not
+      found" for ~41.5% of corpus names
+- [x] Curated landing (four strips) / results split; "Load more" via a Route Handler
+- [x] Scope toggle; `total_relation` rendered as "10,000+"
+- [x] `loading.tsx` / `error.tsx` / `not-found.tsx` — there were none, so an outage rendered as
+      "No skills published yet. Be the first!"
+- [x] `RegistrySkill` gains `owner` / `display_name` / `qualified_name`
+
+**Deployment** — migration applied to the live database, stats populated, API verified
+(FINDINGS §8).
+
+- [ ] **Redeploy the registry once more** to pick up `7ef421b` (the cache-header fix). Nothing
+      is broken without it; the read routes simply are not edge-cached yet.
+
+### Left undone, deliberately
+
+- [ ] **Install command stays the bare name.** The CLI does `encodeURIComponent(name)`, so a
+      qualified name becomes `owner%2Fname` and may match the legacy single-segment route.
+      Whether Vercel normalises `%2F` first is untested. Changing the URL scheme and changing
+      the install command are independent; only the first is done. Gate the second on an
+      end-to-end test against the deployed API with `skilldex-cli@1.2.0`
+- [ ] **Sitemap.** A per-skill sitemap would have to page the API, and every request past
+      offset 10,000 is now refused by the cap this same work introduced. It needs a bulk-export
+      endpoint first. A static `sitemap.ts`/`robots.ts` is cheap and still absent
+- [ ] **`skills_trgm`** is built, integrity-checked, and still queried by nothing
+- [ ] `src/app/registry/skillsets/page.tsx` is a stale fork of the browse page. It inherits the
+      count fix for free; its UI was not redesigned
 
 ---
 

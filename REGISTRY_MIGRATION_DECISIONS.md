@@ -397,6 +397,128 @@ than this registry.
 
 ---
 
+## D15 — `total` becomes a bounded count with an explicit relation
+
+`searchSkills` returned the unpaginated total with `count(*) OVER ()`. At 4,863 rows that was
+free. Measured against the 1.6M-row corpus:
+
+| Query | Time |
+|---|---|
+| Default listing **with** the window function | **>90s — timed out** |
+| Same without it | 2.9s |
+| Bounded count, cap 10,001 | **1.0s** |
+
+An empty `OVER()` declares one partition spanning the result set, so the engine must
+materialise every matching row before it can emit the first — `LIMIT 20` cannot push below it.
+
+The deeper reason it cannot simply be optimised: **ranked retrieval admits early termination
+and counting does not.** Once you hold k candidates and can prove nothing unseen beats the
+k-th, you stop — that is WAND, MaxScore, block-max. That proof says which documents win, never
+how many match. Demanding an exact total forfeits all of it. Elasticsearch made
+`track_total_hits: 10000` the default in 7.0 for exactly this reason, so block-max WAND could
+be switched on.
+
+**Decision.** Adopt the same contract:
+
+| Case | Source of `total` | `total_relation` |
+|---|---|---|
+| No filters, no `q` | precomputed `registry_stats` row | `eq` |
+| Filtered, < cap | bounded count | `eq` |
+| Filtered, ≥ cap | bounded count clamped to cap | `gte` |
+
+`total_relation` is the load-bearing half. A capped count without it is a wrong number served
+confidently; with it the API is honest and the client renders "10,000+". Solr's
+`numFoundExact` and Algolia's `exhaustiveNbHits` are the same idea.
+
+`has_more` comes from a `limit + 1` fetch — free, exact at any N, and what pagination actually
+needs. Page and count go out in one `db.batch()`, so this remains one HTTP round trip; latency
+is dominated by the Turso hop (~8 ms query vs ~300 ms response), so two requests would have
+been a real regression.
+
+`MAX_OFFSET` is set equal to the cap. Any other value makes the API contradict itself —
+reporting `total: 10000, "gte"` while still serving `offset=15000`.
+
+**Never fall back to `count(*)`** when the stats row is missing. That reintroduces the 90s
+timeout in precisely the case the design exists to prevent, on the hottest path in the API.
+The fallback is the bounded count.
+
+**What would reverse this.** A storage engine that can count matches without enumerating them,
+or the corpus shrinking to where an exact count is cheap. Neither is in view.
+
+---
+
+## D16 — A `source` column, and a curated/corpus split
+
+Measured on the merged 1,615,322-row build. Every orderable dimension is degenerate:
+
+| Dimension | Whole corpus | In the curated tier |
+|---|---|---|
+| Rows | 1,615,322 | **4,863** |
+| `trust_tier = 'verified'` | 7 | **7 — all of them** |
+| `install_count > 0` | 33 | **33 — all of them** |
+| Tagged | 2,106 (0.13%) | **2,106 — all of them** |
+| Distinct `published_at` days | 51 | **51 — all of them** |
+| Distinct owners | 158,915 | 17 |
+| `score` 90–100 | 1,345,829 (83%) | — |
+
+99.7% of rows share one `published_at` — the import timestamp. 83% score 90–100. Only 33 rows
+in 1.6M have ever been installed. **The imported corpus contributes no ordering signal at all**,
+and "top owners" is actively misleading: `majiayu000` (31,523 skills), `David-Li0406` (27,006)
+are bulk uploaders, not highlights.
+
+So sorting the whole corpus is meaningless, and the only non-degenerate ranking is bm25 against
+a query.
+
+**Decision.** Add `source TEXT NOT NULL DEFAULT 'seeded' CHECK (source IN ('seeded',
+'imported', 'published'))` and split the registry in two: a curated tier that is browsable,
+exactly countable and meaningfully ordered, and the full index reachable by search. `scope`
+defaults to `curated`, so every existing caller — including published CLI builds — keeps
+getting the small, useful set.
+
+This is what makes D15 cheap in the common case: the default listing filters to ~4,863 rows,
+which is fast *and* exactly countable, so the cap only ever binds on a full-index search.
+
+**Why a column and not `content_key IS NULL`.** That test is correct today only because
+`seed.ts` happens not to set `content_key`. It is an accident of the import, not a stated
+contract, and silently wrong the first time the seeder changes.
+
+**What would reverse this.** Real install counts, real publish dates and dense tags across the
+corpus — i.e. the imported rows acquiring signal of their own. Stamping a genuine commit date
+in `build.ts` would recover `sort=recent` alone.
+
+---
+
+## D17 — The browse page becomes search-first; numbered pagination goes
+
+1.6M skills is 80,766 numbered pages, and `OFFSET` is O(offset), so the deep pages could not
+be served at any speed. Capping the control is not enough — a 500-page picker over a corpus
+with no ordering signal is a control nobody can use.
+
+**Decision.** Landing state shows four curated strips, all scoped to the curated tier where the
+signal is; results state shows a ranked list with a "Load more" button and a
+`Curated | All skills` scope toggle. Skill URLs become `/registry/[owner]/[name]`.
+
+Precedent at this scale is consistent: npm (~3M) has no browse-all page at all; Hugging Face
+(~1.5M) is search plus facets plus infinite scroll; GitHub's search API caps at 1,000 results.
+
+**Full enumeration is not lost.** Keyset pagination — carrying the last sort key rather than an
+offset — walks the whole corpus at constant cost per page. What is given up is *random access
+to page N*, which nobody does, not sequential traversal.
+
+**Load more is a Route Handler, not a Server Action.** Actions are POSTs: uncacheable,
+serialised, and carrying the action-id protocol for what is an idempotent read. A GET is
+cacheable at three layers and testable with `curl`. It also keeps `REGISTRY_URL` server-side.
+
+**Owner-scoped URLs are not optional.** 41.5% of corpus names collide, and the legacy endpoint
+answers a contested name with 409 — which the site was collapsing into a 404. Note `[name]`
+and `[owner]` cannot coexist at the same segment position in the App Router; that is a build
+error, so the directory is renamed rather than added alongside.
+
+**What would reverse this.** Only making the corpus browsable in a way that is genuinely
+useful, which requires ordering signal that does not exist.
+
+---
+
 ## What this migration loses
 
 Recorded honestly, so none of it is discovered later as a surprise.
