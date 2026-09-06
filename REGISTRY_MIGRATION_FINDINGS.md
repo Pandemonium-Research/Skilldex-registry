@@ -164,6 +164,50 @@ rather than relevance is questionable now and will be worse across 1.6M rows whe
 
 ---
 
+## 1d. Phase 3 — per-repo scoping replaces the global preload
+
+The seeder loaded every `source_url` in the registry into one in-memory `Set` on every run.
+That is O(corpus): acceptable at 15,767 rows, and at 1.6M it becomes thousands of paginated
+round trips plus roughly a gigabyte of heap, nightly, for data that barely changes.
+
+Each repo now asks only what is already known about itself, `source_url LIKE
+'https://github.com/{owner}/{repo}/%'`, so cost scales with the repo being scanned.
+
+**Known urls per watched repo**, measured live:
+
+| Repo | Known urls |
+|---|---:|
+| `sickn33/antigravity-awesome-skills` | 10,218 |
+| `TerminalSkills/skills` | 1,955 |
+| `alirezarezvani/claude-skills` | 1,463 |
+| `ComposioHQ/awesome-claude-skills` | 864 |
+| …12 more | ≤ 349 each |
+
+Even the largest repo loads 10,218 urls rather than 1.6M — and that is the worst case in the
+current watch list.
+
+**Coverage check: 15,762 of 15,767** known urls fall under some watched repo. The five that do
+not are `PhilipStark/book-genesis` entries left over from repointing that repo to
+`felipelobomotta-blip/book-genesis-v4`; it is no longer watched, so they can never be
+rediscovered. The point of the check was to detect a *systematic* mismatch — if the seeder
+built `source_url` differently from what the table holds, every skill would look new and be
+re-fetched. Five out of 15,767 is not that.
+
+### The `LIKE` wildcard trap
+
+`_` matches any single character in `LIKE`, and GitHub permits it in owner and repo names. An
+unescaped prefix for `acme/my_repo` also matches `acme/myXrepo` — silently treating a different
+repo's skills as already known and skipping them permanently. `%` is the same hazard.
+
+`likePrefix` escapes both plus the escape character itself, and lives in `src/db/like.ts`
+rather than in the script: importing `seed.ts` to test it would **execute the seeder**, which
+is not something a test suite should be able to do by accident.
+
+`skills_source_url_idx` backs the prefix scan. Without it each watched repo would provoke a
+full table scan — 17 scans of 1.6M rows per nightly run.
+
+---
+
 ## 2. `(owner, name)` collisions in the full corpus
 
 The measurement that decided the naming rule. Query: `dedup_primary = 1` (one row per
