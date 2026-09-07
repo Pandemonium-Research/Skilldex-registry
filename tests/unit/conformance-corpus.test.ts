@@ -17,14 +17,16 @@
  * copy manifest.json here. Never hand-edit an expectedScore to make this pass — a
  * disagreement means one of the two implementations is wrong, and which one is the finding.
  *
- * Coherence is deliberately out of scope. Skillset spec 1.1 is the coherence revision and
- * this registry implements 1.0, so the corpus asserts conformance scores only.
+ * Coherence is in scope as of manifest format 2. This registry implements skillset spec 1.1, so
+ * it must reproduce skilldex's coherence tallies as well as its conformance scores — from a
+ * separate implementation, which is the whole point of the exercise.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { validateSkill } from "../../src/validator/index.js";
 import { validateSkillset } from "../../src/validator/skillset.js";
+import { checkSkillsetCoherence } from "../../src/validator/skillset-coherence.js";
 
 const manifest = JSON.parse(
   readFileSync(join(import.meta.dirname, "..", "conformance-corpus", "manifest.json"), "utf8")
@@ -38,6 +40,15 @@ const manifest = JSON.parse(
     embeddedSkillNames: string[];
     remoteSkillRefs: Array<{ name: string; source_url: string }>;
     expectedScore: number;
+    blobs: Record<string, string>;
+    expectedCoherence: {
+      membersChecked: number;
+      membersCoherent: number;
+      passCount: number;
+      warnCount: number;
+      errorCount: number;
+      declaredConventions: number;
+    } | null;
   }>;
 };
 
@@ -45,7 +56,7 @@ describe("conformance corpus — registry side", () => {
   it("is the format version this test understands", () => {
     // A bump means the manifest shape changed in skilldex and this file needs updating,
     // rather than the corpus quietly validating fewer things than it appears to.
-    expect(manifest.formatVersion).toBe(1);
+    expect(manifest.formatVersion).toBe(2);
   });
 
   it("actually contains cases", () => {
@@ -71,5 +82,39 @@ describe("conformance corpus — registry side", () => {
       });
       expect(result.score).toBe(c.expectedScore);
     });
+
+    it(`skillset ${c.id} coheres as skilldex says it does`, async () => {
+      // The manifest's blobs stand in for what the GitHub adapter fetches in production; the
+      // file list answers the existence questions. Same inputs skilldex had from disk.
+      const coherence = await checkSkillsetCoherence(
+        {
+          listFiles: () => c.files,
+          async readFile(rel: string) {
+            return Object.prototype.hasOwnProperty.call(c.blobs, rel) ? c.blobs[rel] : null;
+          },
+        },
+        c.embeddedSkillNames
+      );
+
+      expect({
+        membersChecked: coherence.membersChecked,
+        membersCoherent: coherence.membersCoherent,
+        passCount: coherence.passCount,
+        warnCount: coherence.warnCount,
+        errorCount: coherence.errorCount,
+        declaredConventions: coherence.declaredConventions.length,
+      }).toEqual(c.expectedCoherence);
+    });
   }
+
+  it("is checked against skillsets that actually declare conventions", () => {
+    // Reproducing "all zeros" proves nothing about agreement checking. If the corpus ever loses
+    // its contradiction case, this suite would keep passing while the hardest logic in the port
+    // went unverified.
+    const withConventions = manifest.skillsets.filter(
+      (c) => (c.expectedCoherence?.declaredConventions ?? 0) > 0
+    );
+    expect(withConventions.length).toBeGreaterThan(0);
+    expect(withConventions.some((c) => (c.expectedCoherence?.errorCount ?? 0) > 0)).toBe(true);
+  });
 });
