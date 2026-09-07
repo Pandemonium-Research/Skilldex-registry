@@ -7,10 +7,75 @@ import {
   updateSkillset,
   deleteSkillset,
 } from "../db/skillsets.js";
-import { fetchSkillsetFromGitHub } from "../github/fetch-skillset.js";
-import { validateSkillset } from "../validator/skillset.js";
+import { fetchSkillsetFromGitHub, type SkillsetMetadata } from "../github/fetch-skillset.js";
+import { validateSkillset, SKILLSET_SPEC_VERSION } from "../validator/skillset.js";
+import {
+  checkSkillsetCoherence,
+  type SkillsetCoherenceResult,
+} from "../validator/skillset-coherence.js";
 
 export const skillsetsPublishRoutes = new Hono();
+
+/**
+ * Upper bound on members whose SKILL.md this route will fetch.
+ *
+ * Coherence costs one request per member plus one per shared asset. Official skillsets carry two
+ * to four members, so this is far above anything real; it exists so a skillset with thousands of
+ * directories cannot turn one publish into an unbounded fan-out inside a serverless function.
+ * Exceeded, the publish is refused rather than scored on a subset — checking 50 of 500 members
+ * and reporting the ratio as if it covered the skillset would be worse than declining.
+ */
+const MAX_COHERENCE_MEMBERS = 50;
+
+type CoherenceOutcome =
+  | { ok: true; coherence: SkillsetCoherenceResult }
+  | { ok: false; reason: string };
+
+/**
+ * Compute coherence for a fetched skillset, or explain why it could not be.
+ *
+ * The prefetch is the point. checkSkillsetCoherence treats a member it cannot read as "nothing to
+ * check" and leaves it in the coherent set — right for skilldex, where that only happens if a
+ * file vanishes mid-scan, but on a registry the same path covers a failed GitHub request, and a
+ * transient error silently *inflating* the ratio is the worst possible failure mode for a number
+ * people sort by. Fetching every member up front turns that into an explicit refusal.
+ *
+ * It is also what makes this affordable: the check reads members in a loop, and readFile memoizes,
+ * so priming the cache in parallel collapses N sequential round trips into one.
+ */
+async function computeCoherence(metadata: SkillsetMetadata): Promise<CoherenceOutcome> {
+  const members = metadata.embeddedSkillNames;
+
+  if (members.length > MAX_COHERENCE_MEMBERS) {
+    return {
+      ok: false,
+      reason:
+        `Skillset has ${members.length} embedded skills, above the ${MAX_COHERENCE_MEMBERS} ` +
+        `this registry will check for coherence`,
+    };
+  }
+
+  const missing = (
+    await Promise.all(
+      members.map(async (m) => ((await metadata.readFile(`${m}/SKILL.md`)) === null ? m : null))
+    )
+  ).filter((m): m is string => m !== null);
+
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      reason: `Could not fetch SKILL.md for: ${missing.join(", ")}`,
+    };
+  }
+
+  return {
+    ok: true,
+    coherence: await checkSkillsetCoherence(
+      { readFile: metadata.readFile, listFiles: () => metadata.files },
+      members
+    ),
+  };
+}
 
 // POST /skillsets — submit a new skillset to the registry
 skillsetsPublishRoutes.post("/", requireAuth, async (c) => {
@@ -57,6 +122,11 @@ skillsetsPublishRoutes.post("/", requireAuth, async (c) => {
     ),
   });
 
+  const outcome = await computeCoherence(metadata);
+  if (!outcome.ok) {
+    return c.json({ error: outcome.reason, code: "UNPROCESSABLE" }, 422);
+  }
+
   const publisher = c.get("publisher");
 
   // Store in database
@@ -68,20 +138,24 @@ skillsetsPublishRoutes.post("/", requireAuth, async (c) => {
     source_url: parsed.data.source_url,
     trust_tier: "community",
     score: validation.score,
-    // The column is NOT NULL, so an omitted spec_version would fail the insert rather
-    // than the validation. Stays "1.0" until the registry computes coherence: skillset
-    // spec 1.1 IS the coherence revision (skilldex fdf9560 bumped it alongside
-    // skillset-coherence.ts), so claiming 1.1 without computing it would be a lie.
-    spec_version: metadata.spec_version ?? "1.0",
+    // What this registry validated against, not what the frontmatter claimed — see the constant.
+    spec_version: SKILLSET_SPEC_VERSION,
     tags: parsed.data.tags ?? null,
     skill_refs: metadata.skillRefs,
     published_by: publisher.id,
+    members_checked: outcome.coherence.membersChecked,
+    members_coherent: outcome.coherence.membersCoherent,
+    coherence: outcome.coherence,
   });
 
   return c.json(
     {
       skillset: skillsetRowToApi(skillset),
       diagnostics: validation.diagnostics,
+      // The full result, not the summary the DTO carries: this is the response the publisher
+      // acts on, so it needs the per-member diagnostics and the conventions they were judged
+      // against, not just the tallies.
+      coherence: outcome.coherence,
     },
     201
   );
@@ -126,18 +200,29 @@ skillsetsPublishRoutes.patch("/:name", requireAuth, async (c) => {
     ),
   });
 
+  // Coherence is recomputed here for the same reason the score is: a PATCH re-fetches the
+  // source, so a stored ratio describing an older tree would outlive the tree it described.
+  const outcome = await computeCoherence(metadata);
+  if (!outcome.ok) {
+    return c.json({ error: outcome.reason, code: "UNPROCESSABLE" }, 422);
+  }
+
   // Same fallback and default as the POST path — a re-fetch must not blank a description
   // or null a NOT NULL column that the original insert populated.
   const updated = await updateSkillset(name, {
     description: metadata.description || metadata.name || existing.description,
     score: validation.score,
-    spec_version: metadata.spec_version ?? existing.spec_version ?? "1.0",
+    spec_version: SKILLSET_SPEC_VERSION,
     skill_refs: metadata.skillRefs,
+    members_checked: outcome.coherence.membersChecked,
+    members_coherent: outcome.coherence.membersCoherent,
+    coherence: outcome.coherence,
   });
 
   return c.json({
     skillset: skillsetRowToApi(updated!),
     diagnostics: validation.diagnostics,
+    coherence: outcome.coherence,
   });
 });
 
