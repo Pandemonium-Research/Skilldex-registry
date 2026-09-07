@@ -14,6 +14,7 @@
 import type { Row } from "@libsql/client";
 import type { SkillRow } from "../types/skill.js";
 import type { SkillsetRow } from "../types/skillset.js";
+import type { SkillsetCoherenceResult } from "../validator/skillset-coherence.js";
 import type { PublisherRow } from "../types/publisher.js";
 
 function str(v: unknown): string {
@@ -45,6 +46,21 @@ function jsonArray<T>(v: unknown): T[] | null {
   try {
     const parsed = JSON.parse(String(v));
     return Array.isArray(parsed) ? (parsed as T[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse a JSON object column. Arrays are rejected along with malformed text, for the same reason
+ * jsonArray rejects objects: a column whose shape has drifted should read as absent rather than
+ * hand a caller something it will destructure incorrectly.
+ */
+function jsonObject<T>(v: unknown): T | null {
+  if (v == null) return null;
+  try {
+    const parsed = JSON.parse(String(v));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as T) : null;
   } catch {
     return null;
   }
@@ -88,6 +104,10 @@ export function toSkillsetRow(r: Row): SkillsetRow {
     published_at: str(r.published_at),
     updated_at: str(r.updated_at),
     published_by: strOrNull(r.published_by),
+    members_checked: numOrNull(r.members_checked),
+    members_coherent: numOrNull(r.members_coherent),
+    coherence: jsonObject<SkillsetCoherenceResult>(r.coherence),
+    coherence_pct: numOrNull(r.coherence_pct),
   };
 }
 

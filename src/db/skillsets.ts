@@ -20,6 +20,10 @@ const SORT_MAP: Record<string, string> = {
   score: "s.score DESC, s.seq ASC",
   recent: "s.published_at DESC, s.seq ASC",
   name: "s.name ASC, s.seq ASC",
+  // A skillset never checked for coherence has coherence_pct NULL, and SQLite sorts NULLs last
+  // under DESC — so "most coherent first" puts unmeasured skillsets behind measured ones rather
+  // than ahead of them, which is the honest order for a ranking built on the column.
+  coherence: "s.coherence_pct DESC, s.seq ASC",
 };
 
 export interface SearchSkillsetsResult {
@@ -69,6 +73,13 @@ export async function searchSkillsets(
   if (params.spec_version) {
     where.push("s.spec_version = ?");
     whereArgs.push(params.spec_version);
+  }
+
+  // Unmeasured skillsets are excluded by the NULL comparison rather than treated as 0 — asking
+  // for "at least 50% coherent" should not return things nobody has checked.
+  if (params.min_coherence !== undefined) {
+    where.push("s.coherence_pct >= ?");
+    whereArgs.push(params.min_coherence);
   }
 
   if (params.tags) {
@@ -153,18 +164,22 @@ export async function incrementSkillsetInstallCount(name: string): Promise<Skill
 }
 
 export async function createSkillset(
-  skillset: Omit<SkillsetRow, "id" | "skill_count" | "install_count" | "published_at" | "updated_at">
+  skillset: Omit<
+    SkillsetRow,
+    "id" | "skill_count" | "install_count" | "published_at" | "updated_at" | "coherence_pct"
+  >
 ): Promise<SkillsetRow> {
   const db = getDb();
   const id = crypto.randomUUID();
 
   try {
-    // skill_count is a generated column and must not be written.
+    // skill_count and coherence_pct are generated columns and must not be written.
     const r = await db.execute({
       sql: `INSERT INTO skillsets
               (id, name, description, author, source_url, trust_tier, score,
-               spec_version, tags, skill_refs, published_by)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               spec_version, tags, skill_refs, published_by,
+               members_checked, members_coherent, coherence)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             RETURNING *`,
       args: [
         id,
@@ -178,6 +193,9 @@ export async function createSkillset(
         jsonOrNull(skillset.tags),
         JSON.stringify(skillset.skill_refs ?? []),
         skillset.published_by,
+        skillset.members_checked,
+        skillset.members_coherent,
+        skillset.coherence === null ? null : JSON.stringify(skillset.coherence),
       ],
     });
     return toSkillsetRow(r.rows[0]);
@@ -191,7 +209,20 @@ export async function createSkillset(
 
 export async function updateSkillset(
   name: string,
-  updates: Partial<Pick<SkillsetRow, "description" | "score" | "spec_version" | "tags" | "source_url" | "skill_refs">>
+  updates: Partial<
+    Pick<
+      SkillsetRow,
+      | "description"
+      | "score"
+      | "spec_version"
+      | "tags"
+      | "source_url"
+      | "skill_refs"
+      | "members_checked"
+      | "members_coherent"
+      | "coherence"
+    >
+  >
 ): Promise<SkillsetRow | null> {
   const db = getDb();
 
@@ -202,6 +233,9 @@ export async function updateSkillset(
     sets.push(`${k} = ?`);
     if (k === "tags") args.push(jsonOrNull(v as string[] | null));
     else if (k === "skill_refs") args.push(JSON.stringify(v));
+    // An object column, so it needs serialising like the two above — but null must stay null
+    // rather than becoming the string "null", which json_valid() would happily accept.
+    else if (k === "coherence") args.push(v === null ? null : JSON.stringify(v));
     else args.push(v as any);
   }
   sets.push("updated_at = ?");

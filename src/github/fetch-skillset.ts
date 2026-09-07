@@ -10,6 +10,17 @@ export interface SkillsetMetadata {
   files: string[];
   skillRefs: SkillRef[];        // all skills: embedded + remote refs from frontmatter
   embeddedSkillNames: string[]; // discovered from directory listing
+  /**
+   * Reads any file in the skillset by skillset-relative POSIX path ("assets/x.md",
+   * "member/SKILL.md"), or null when it is absent or could not be fetched.
+   *
+   * `files` above is a listing, not content, and coherence checking needs the bytes of every
+   * member's SKILL.md and every shared asset. This closes over the already-resolved repo
+   * coordinates so callers need not re-parse the URL, and memoizes per path because the coherence
+   * checks read each shared asset twice — once collecting declared conventions, once looking for
+   * undeclared ones.
+   */
+  readFile(relPath: string): Promise<string | null>;
 }
 
 /**
@@ -30,6 +41,22 @@ export async function fetchSkillsetFromGitHub(sourceUrl: string): Promise<Skills
 
   const ref = branch || "main";
   const basePath = subpath ? `${subpath}/` : "";
+
+  // Memoized blob reader over these coordinates. The promise is cached rather than its result so
+  // concurrent reads of the same path share one request. `.catch` keeps the contract callers rely
+  // on — null for unreadable, never a rejection — since fetch throws on a transport error where
+  // fetchFileContent only returns null for an HTTP one.
+  const blobs = new Map<string, Promise<string | null>>();
+  const readFile = (relPath: string): Promise<string | null> => {
+    let pending = blobs.get(relPath);
+    if (!pending) {
+      pending = fetchFileContent(owner, repo, ref, `${basePath}${relPath}`, headers).catch(
+        () => null
+      );
+      blobs.set(relPath, pending);
+    }
+    return pending;
+  };
 
   // Fetch SKILLSET.md content
   const skillsetMdPath = `${basePath}SKILLSET.md`;
@@ -83,6 +110,7 @@ export async function fetchSkillsetFromGitHub(sourceUrl: string): Promise<Skills
     files,
     skillRefs,
     embeddedSkillNames,
+    readFile,
   };
 }
 

@@ -3,6 +3,19 @@ import type { ValidationDiagnostic } from "../types/api.js";
 
 const MIN_DESCRIPTION_WORDS = 30;
 
+/**
+ * The skillset spec this validator implements — mirrors skilldex's SKILLSET_SPEC_VERSION.
+ *
+ * 1.1 IS the coherence revision: skilldex bumped it in the same commit that added
+ * skillset-coherence.ts. The registry could only honestly claim 1.0 until it computed coherence
+ * too, which it now does (src/validator/skillset-coherence.ts), so both sides say 1.1.
+ *
+ * Note this is what the validator *implements*, not what a skillset's frontmatter *claims* —
+ * skilldex returns this same constant regardless of the file's own spec_version, and storing an
+ * author's claim instead would record something no validation ever checked.
+ */
+export const SKILLSET_SPEC_VERSION = "1.1";
+
 // Scoring weights, summing to 100 and matching skilldex's
 // src/core/skillset-validator.ts table entry for entry.
 //
