@@ -1,0 +1,702 @@
+// Skillset coherence — ported from skilldex's src/core/skillset-coherence.ts.
+//
+// NOTE: This check is duplicated in skilldex and skilldex-registry, like the two validators
+// beside it. Keep both in sync manually; tests/unit/conformance-corpus.test.ts pins them to
+// the same answers so a divergence fails on whichever side drifted.
+//
+// WHY THE REGISTRY COMPUTES THIS RATHER THAN TRUSTING THE CLI
+// Skillsets reach the registry through exactly one door — POST /skillsets — unlike skills,
+// which are also batch-scraped by the nightly sync. It is therefore tempting to let
+// `skillpm skillset publish` compute coherence and submit the number. It isn't safe: the
+// API is the trust boundary, not the CLI, and any holder of a publish token can POST a
+// coherence score of their choosing. Since coherence is stored sortable, a self-reported
+// value is a forgeable ranking signal. Computing it here costs one fetch per member plus one
+// per shared asset — 5 extra calls for the `developer` skillset — against a 5,000/hr
+// authenticated GitHub budget on an endpoint that runs interactively. That is affordable in
+// a way the 1.6M-row skills path never was.
+//
+// HOW THE PORT DIFFERS FROM THE CLI
+// skilldex reads a working tree; the registry has a GitHub tree listing plus fetched blobs.
+// The parsing functions below are the CLI's logic unchanged — tests/unit/skillset-coherence.test.ts
+// pins the behaviour, and both implementations were diffed function-by-function and run against
+// every real skillset to confirm identical output. Only I/O is abstracted, behind CoherenceSource:
+// existence becomes a set lookup rather than a stat, and asset listing is sorted rather than
+// readdir-ordered (readdir is unordered by contract, so a server needs a reproducible choice).
+
+import { parseDocument } from "yaml";
+
+const SKILL_MD = "SKILL.md";
+const ASSETS_DIR = "assets";
+const CONVENTIONS_INFO_TAG = "skilldex-conventions";
+
+/** Minimum overlapping keys before a member table is treated as restating a convention. */
+const RESTATEMENT_KEY_THRESHOLD = 2;
+
+export type CoherenceCheck =
+  | "shared-asset-referenced"
+  | "shared-asset-resolvable"
+  | "shared-asset-agreement"
+  | "undeclared-convention";
+
+/** A key -> value mapping a shared asset declares as binding on the skillset's members. */
+export interface DeclaredConvention {
+  name: string;
+  /** Path relative to the skillset root, e.g. "assets/commit-conventions.md". */
+  assetFile: string;
+  /** 1-indexed line of the declaring fence. */
+  line: number;
+  mapping: Record<string, string>;
+}
+
+export interface CoherenceDiagnostic {
+  severity: "pass" | "warning" | "error";
+  check: CoherenceCheck;
+  /** Embedded skill directory name. */
+  member: string;
+  message: string;
+  /** 1-indexed line in the member's SKILL.md. */
+  line?: number;
+  conventionName?: string;
+  key?: string;
+  declaredValue?: string;
+  memberValue?: string;
+  assetFile?: string;
+  assetLine?: number;
+}
+
+export interface MarkdownTable {
+  /** 1-indexed line of the header row. */
+  line: number;
+  header: string[];
+  rows: string[][];
+}
+
+export interface SkillsetCoherenceResult {
+  declaredConventions: DeclaredConvention[];
+  diagnostics: CoherenceDiagnostic[];
+  membersChecked: number;
+  membersCoherent: number;
+  passCount: number;
+  warnCount: number;
+  errorCount: number;
+}
+
+/**
+ * The skillset's bytes, however the caller happens to hold them.
+ *
+ * The CLI backs this with the filesystem, the registry with GitHub blob fetches. Keeping the
+ * checks free of both means the logic below is identical on either side, and testable without
+ * a network or a temp directory.
+ */
+export interface CoherenceSource {
+  /**
+   * Content of a skillset-relative POSIX path ("assets/x.md", "member/SKILL.md"), or null when
+   * it is absent or unreadable. Implementations should memoize: collectDeclaredConventions and
+   * checkUndeclaredConventions both read every shared asset.
+   */
+  readFile(relPath: string): Promise<string | null>;
+  /** Every file in the skillset, as skillset-relative POSIX paths. */
+  listFiles(): string[];
+}
+
+/**
+ * Checks that a skillset's member skills agree with the conventions its shared assets declare.
+ *
+ * Structural validation (see skillset.ts) establishes that a skillset is well-formed. It cannot
+ * express agreement *between* members, which is the property skillsets exist to provide:
+ * conventions live in one shared asset so independently authored members cannot drift apart.
+ *
+ * Agreement is checked against conventions the shared asset *declares* in a fenced
+ * yaml skilldex-conventions block, not inferred from prose. A member that restates a declared
+ * mapping and contradicts it is an error. A member that appears to restate a convention nobody
+ * declared is a warning — the fix is to declare it.
+ */
+export async function checkSkillsetCoherence(
+  source: CoherenceSource,
+  embeddedSkills: string[]
+): Promise<SkillsetCoherenceResult> {
+  const diagnostics: CoherenceDiagnostic[] = [];
+
+  const files = source.listFiles();
+  const fileSet = new Set(files);
+  const sharedAssets = listSharedAssets(files);
+  const declaredConventions = await collectDeclaredConventions(source, sharedAssets);
+
+  const coherentMembers = new Set(embeddedSkills);
+
+  for (const member of embeddedSkills) {
+    const content = await source.readFile(`${member}/${SKILL_MD}`);
+    if (content === null) {
+      // Members are discovered from a listing that already required a SKILL.md, so a miss here
+      // means the fetch failed rather than that the file is absent. Skipping keeps a transient
+      // GitHub error from turning into a coherence verdict; the member is simply not counted.
+      // Mirrors the CLI, where the same read can lose a race with the directory scan.
+      continue;
+    }
+
+    const refs = extractAssetReferences(content);
+    const tables = parseMarkdownTables(content);
+
+    const before = diagnostics.length;
+
+    diagnostics.push(...checkSharedAssetReferenced(member, refs, sharedAssets));
+    diagnostics.push(...checkSharedAssetResolvable(member, refs, fileSet));
+    diagnostics.push(...checkAgreement(member, tables, declaredConventions));
+
+    if (declaredConventions.length === 0) {
+      diagnostics.push(
+        ...(await checkUndeclaredConventions(source, member, tables, sharedAssets))
+      );
+    }
+
+    const added = diagnostics.slice(before);
+    if (added.some((d) => d.severity === "error" || d.severity === "warning")) {
+      coherentMembers.delete(member);
+    }
+  }
+
+  return {
+    declaredConventions,
+    diagnostics,
+    membersChecked: embeddedSkills.length,
+    membersCoherent: coherentMembers.size,
+    passCount: diagnostics.filter((d) => d.severity === "pass").length,
+    warnCount: diagnostics.filter((d) => d.severity === "warning").length,
+    errorCount: diagnostics.filter((d) => d.severity === "error").length,
+  };
+}
+
+// --- Check: every member reaches for at least one skillset-level shared asset ---
+
+function checkSharedAssetReferenced(
+  member: string,
+  refs: AssetReference[],
+  sharedAssets: string[]
+): CoherenceDiagnostic[] {
+  if (sharedAssets.length === 0) return [];
+
+  const sharedRefs = refs.filter((r) => r.isSkillsetLevel);
+  if (sharedRefs.length === 0) {
+    return [
+      {
+        severity: "warning",
+        check: "shared-asset-referenced",
+        member,
+        message: `"${member}" references no skillset-level shared asset (../${ASSETS_DIR}/…) — it is outside the skillset's convention guarantee`,
+      },
+    ];
+  }
+
+  return [
+    {
+      severity: "pass",
+      check: "shared-asset-referenced",
+      member,
+      message: `"${member}" references ${sharedRefs.length} shared asset(s)`,
+    },
+  ];
+}
+
+// --- Check: referenced asset paths actually resolve ---
+
+function checkSharedAssetResolvable(
+  member: string,
+  refs: AssetReference[],
+  fileSet: Set<string>
+): CoherenceDiagnostic[] {
+  const diagnostics: CoherenceDiagnostic[] = [];
+
+  for (const ref of refs) {
+    // The CLI stats the resolved absolute path; here it is membership in the skillset's own
+    // file list. Same answer for every reference extractAssetReferences can produce, and the
+    // right one for a registry: a skillset referencing files it does not contain cannot be
+    // installed, whatever else happens to sit at that path on the publisher's disk.
+    const resolved = resolveMemberRef(member, ref.rawPath);
+    if (resolved === null || !fileSet.has(resolved)) {
+      diagnostics.push({
+        severity: "error",
+        check: "shared-asset-resolvable",
+        member,
+        line: ref.line,
+        message: `"${member}" references "${ref.rawPath}" which does not exist`,
+        assetFile: ref.rawPath,
+      });
+    }
+  }
+
+  if (diagnostics.length === 0 && refs.length > 0) {
+    diagnostics.push({
+      severity: "pass",
+      check: "shared-asset-resolvable",
+      member,
+      message: `all ${refs.length} asset reference(s) in "${member}" resolve`,
+    });
+  }
+
+  return diagnostics;
+}
+
+// --- Check: restated conventions agree with the declaration ---
+
+function checkAgreement(
+  member: string,
+  tables: MarkdownTable[],
+  conventions: DeclaredConvention[]
+): CoherenceDiagnostic[] {
+  const diagnostics: CoherenceDiagnostic[] = [];
+
+  for (const convention of conventions) {
+    const restatement = findRestatement(tables, convention);
+    if (!restatement) continue;
+
+    const vocabulary = buildVocabulary(convention);
+    let contradictions = 0;
+    let unverifiable = 0;
+    let compared = 0;
+
+    for (const [key, memberValue] of Object.entries(restatement.mapping)) {
+      const declaredValue = convention.mapping[key];
+      if (declaredValue === undefined) continue;
+      compared++;
+
+      const declaredNorm = normalizeValue(declaredValue);
+      const memberNorm = resolveAgainstVocabulary(normalizeValue(memberValue), vocabulary);
+
+      if (memberNorm === null) {
+        unverifiable++;
+        diagnostics.push({
+          severity: "warning",
+          check: "shared-asset-agreement",
+          member,
+          line: restatement.line,
+          conventionName: convention.name,
+          key,
+          declaredValue,
+          memberValue,
+          assetFile: convention.assetFile,
+          assetLine: convention.line,
+          message: `"${member}" restates "${convention.name}" but its value for \`${key}\` ("${memberValue}") does not match any value the declaration uses — cannot verify agreement`,
+        });
+      } else if (memberNorm !== declaredNorm) {
+        contradictions++;
+        diagnostics.push({
+          severity: "error",
+          check: "shared-asset-agreement",
+          member,
+          line: restatement.line,
+          conventionName: convention.name,
+          key,
+          declaredValue,
+          memberValue,
+          assetFile: convention.assetFile,
+          assetLine: convention.line,
+          message: `"${member}" contradicts "${convention.name}": \`${key}\` is "${memberValue}" here but "${declaredValue}" in ${convention.assetFile}:${convention.line}`,
+        });
+      }
+    }
+
+    if (contradictions === 0 && unverifiable === 0) {
+      diagnostics.push({
+        severity: "pass",
+        check: "shared-asset-agreement",
+        member,
+        conventionName: convention.name,
+        message: `"${member}" restates "${convention.name}" consistently (${compared} of ${Object.keys(convention.mapping).length} declared key(s) checked)`,
+      });
+    }
+  }
+
+  return diagnostics;
+}
+
+// --- Check: a convention appears duplicated but was never declared ---
+
+async function checkUndeclaredConventions(
+  source: CoherenceSource,
+  member: string,
+  memberTables: MarkdownTable[],
+  sharedAssets: string[]
+): Promise<CoherenceDiagnostic[]> {
+  if (memberTables.length === 0) return [];
+
+  for (const asset of sharedAssets) {
+    const assetContent = await source.readFile(asset);
+    if (assetContent === null) continue;
+
+    const assetTables = parseMarkdownTables(assetContent);
+
+    for (const memberTable of memberTables) {
+      for (const assetTable of assetTables) {
+        const overlap = countKeyOverlap(memberTable, assetTable);
+        if (overlap >= RESTATEMENT_KEY_THRESHOLD) {
+          return [
+            {
+              severity: "warning",
+              check: "undeclared-convention",
+              member,
+              line: memberTable.line,
+              assetFile: asset,
+              assetLine: assetTable.line,
+              message: `"${member}" appears to restate a table from ${asset}:${assetTable.line} (${overlap} shared keys) but that convention is not declared — add a \`\`\`yaml ${CONVENTIONS_INFO_TAG}\`\`\` block to ${asset} so agreement can be enforced`,
+            },
+          ];
+        }
+      }
+    }
+  }
+
+  return [];
+}
+
+// --- Declared conventions ---
+
+/**
+ * Shared assets are the depth-1 .md files under assets/, matching the CLI's readdir + isFile.
+ *
+ * Sorted, where the CLI takes readdir order. readdir is unordered by contract, so the CLI's
+ * choice of which asset reports an undeclared convention first is incidental; sorting makes the
+ * registry's answer reproducible across fetches rather than dependent on GitHub's tree order.
+ */
+function listSharedAssets(files: string[]): string[] {
+  return files
+    .filter((file) => {
+      const parts = file.split("/");
+      return parts.length === 2 && parts[0] === ASSETS_DIR && parts[1].endsWith(".md");
+    })
+    .sort();
+}
+
+async function collectDeclaredConventions(
+  source: CoherenceSource,
+  sharedAssets: string[]
+): Promise<DeclaredConvention[]> {
+  const conventions: DeclaredConvention[] = [];
+
+  for (const asset of sharedAssets) {
+    const content = await source.readFile(asset);
+    if (content === null) continue;
+    conventions.push(...parseDeclaredConventions(content, asset));
+  }
+
+  return conventions;
+}
+
+/** Extracts fenced yaml skilldex-conventions blocks. Exported for tests. */
+export function parseDeclaredConventions(
+  content: string,
+  assetFile: string
+): DeclaredConvention[] {
+  const conventions: DeclaredConvention[] = [];
+  const lines = splitLines(content);
+
+  for (let i = 0; i < lines.length; i++) {
+    const fence = lines[i].match(/^(\s*)(`{3,}|~{3,})\s*(.*)$/);
+    if (!fence) continue;
+
+    const [, indent, marker, info] = fence;
+    if (!info.split(/\s+/).includes(CONVENTIONS_INFO_TAG)) continue;
+
+    const closer = new RegExp(`^\\s{0,${indent.length}}${marker[0]}{${marker.length},}\\s*$`);
+    let end = -1;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (closer.test(lines[j])) {
+        end = j;
+        break;
+      }
+    }
+    if (end === -1) continue;
+
+    const body = lines.slice(i + 1, end).join("\n");
+    const blockLine = i + 1;
+
+    try {
+      const doc = parseDocument(body);
+      if (doc.errors.length > 0) continue;
+
+      const parsed = doc.toJS() as Record<string, unknown> | null;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+
+      for (const [name, value] of Object.entries(parsed)) {
+        const mapping = toFlatMapping(value);
+        if (mapping === null || Object.keys(mapping).length === 0) continue;
+        conventions.push({ name, assetFile, line: blockLine, mapping });
+      }
+    } catch {
+      // unparseable block — skip; structural validation reports malformed YAML separately
+    }
+
+    i = end;
+  }
+
+  return conventions;
+}
+
+function toFlatMapping(value: unknown): Record<string, string> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+  const mapping: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (v === null || typeof v === "object") return null;
+    mapping[normalizeKey(k)] = String(v);
+  }
+  return mapping;
+}
+
+// --- Asset references ---
+
+export interface AssetReference {
+  rawPath: string;
+  line: number;
+  isSkillsetLevel: boolean;
+}
+
+/** Finds backticked paths pointing into assets/ or references/. Exported for tests. */
+export function extractAssetReferences(content: string): AssetReference[] {
+  const refs: AssetReference[] = [];
+  const seen = new Set<string>();
+  const lines = splitLines(content);
+
+  const pattern = /`((?:\.\.\/)?(?:assets|references)\/[^`\s]+)`/g;
+
+  for (let i = 0; i < lines.length; i++) {
+    for (const match of lines[i].matchAll(pattern)) {
+      const rawPath = match[1];
+      if (seen.has(rawPath)) continue;
+      seen.add(rawPath);
+      refs.push({
+        rawPath,
+        line: i + 1,
+        isSkillsetLevel: rawPath.startsWith("../"),
+      });
+    }
+  }
+
+  return refs;
+}
+
+// --- Markdown tables ---
+
+/** Parses pipe tables into header + rows. Exported for tests. */
+export function parseMarkdownTables(content: string): MarkdownTable[] {
+  const tables: MarkdownTable[] = [];
+  const lines = splitLines(content);
+
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (!isTableRow(lines[i]) || !isSeparatorRow(lines[i + 1])) continue;
+
+    const header = splitRow(lines[i]);
+    const rows: string[][] = [];
+    let j = i + 2;
+    for (; j < lines.length && isTableRow(lines[j]); j++) {
+      rows.push(splitRow(lines[j]));
+    }
+
+    if (rows.length > 0) {
+      tables.push({ line: i + 1, header, rows });
+    }
+    i = j - 1;
+  }
+
+  return tables;
+}
+
+function isTableRow(line: string): boolean {
+  return line.trim().startsWith("|") && line.includes("|", line.indexOf("|") + 1);
+}
+
+function isSeparatorRow(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("|")) return false;
+  return splitRow(line).every((cell) => /^:?-{1,}:?$/.test(cell.trim()));
+}
+
+function splitRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.split("|").map((c) => c.trim());
+}
+
+// --- Restatement matching ---
+
+interface Restatement {
+  line: number;
+  mapping: Record<string, string>;
+}
+
+/**
+ * A member restates a convention when one of its tables projects onto the convention's key space.
+ * Tables carry more than two columns (Type / Use when / Changelog section), so every
+ * (first column -> column j) projection is tried and the best one wins.
+ *
+ * Key overlap alone does not identify the value column: in Type / Notes / Section both
+ * projections share exactly the same keys, and picking the wrong one compares prose against the
+ * convention and reports nothing useful. Ties therefore break on how many values land in the
+ * convention's own vocabulary — the value column is the one speaking the convention's language.
+ */
+function findRestatement(
+  tables: MarkdownTable[],
+  convention: DeclaredConvention
+): Restatement | null {
+  const vocabulary = buildVocabulary(convention);
+
+  let best: Restatement | null = null;
+  let bestOverlap = 0;
+  let bestResolvable = -1;
+
+  for (const table of tables) {
+    const columnCount = Math.max(...table.rows.map((r) => r.length), table.header.length);
+
+    for (let col = 1; col < columnCount; col++) {
+      const mapping = projectTable(table, col);
+      const sharedKeys = Object.keys(mapping).filter((k) => k in convention.mapping);
+      if (sharedKeys.length < RESTATEMENT_KEY_THRESHOLD) continue;
+
+      const resolvable = sharedKeys.filter(
+        (k) => resolveAgainstVocabulary(normalizeValue(mapping[k]), vocabulary) !== null
+      ).length;
+
+      const better =
+        sharedKeys.length > bestOverlap ||
+        (sharedKeys.length === bestOverlap && resolvable > bestResolvable);
+
+      if (better) {
+        bestOverlap = sharedKeys.length;
+        bestResolvable = resolvable;
+        best = { line: table.line, mapping };
+      }
+    }
+  }
+
+  return best;
+}
+
+function projectTable(table: MarkdownTable, valueColumn: number): Record<string, string> {
+  const mapping: Record<string, string> = {};
+
+  for (const row of table.rows) {
+    if (row.length <= valueColumn) continue;
+    const value = row[valueColumn].trim();
+    if (value === "") continue;
+
+    for (const key of splitKeyCell(row[0])) {
+      mapping[key] = value;
+    }
+  }
+
+  return mapping;
+}
+
+/** Two backticked names in one cell means two keys sharing a value. */
+function splitKeyCell(cell: string): string[] {
+  const backticked = [...cell.matchAll(/`([^`]+)`/g)].map((m) => normalizeKey(m[1]));
+  if (backticked.length > 0) return backticked;
+
+  const bare = normalizeKey(cell);
+  return bare === "" ? [] : [bare];
+}
+
+function countKeyOverlap(a: MarkdownTable, b: MarkdownTable): number {
+  const keysOf = (t: MarkdownTable) =>
+    new Set(t.rows.flatMap((row) => (row.length > 0 ? splitKeyCell(row[0]) : [])));
+
+  const aKeys = keysOf(a);
+  const bKeys = keysOf(b);
+  let overlap = 0;
+  for (const key of aKeys) {
+    if (bKeys.has(key)) overlap++;
+  }
+  return overlap;
+}
+
+// --- Path resolution ---
+
+/**
+ * Resolves a reference written inside member/SKILL.md to a skillset-relative POSIX path.
+ *
+ * Returns null when the path climbs above the skillset root. That is defensive rather than
+ * reachable today: extractAssetReferences admits at most one leading "../" and members sit one
+ * level down, so the deepest any reference reaches is the skillset root itself. The guard is
+ * here so a future change to that pattern cannot turn into a path escape silently.
+ */
+function resolveMemberRef(member: string, rawPath: string): string | null {
+  const segments: string[] = [];
+
+  for (const segment of `${member}/${rawPath}`.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.length === 0) return null;
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  return segments.length === 0 ? null : segments.join("/");
+}
+
+/**
+ * Splits into lines, tolerating CRLF.
+ *
+ * Plain split('\n') leaves a trailing \r on every line, which silently broke fence detection: the
+ * info-string regex ends in (.*)$, and `.` does not match \r while `$` without /m demands the true
+ * end of input, so a fence line read as "```yaml skilldex-conventions\r" matched nothing at all.
+ * Every convention in a CRLF working tree therefore went undeclared — agreement checking was
+ * disabled, and the conventions were then reported as *undeclared*, the opposite of what the asset
+ * says. Git stores LF, so this only ever bit checkouts with core.autocrlf on. Same class as the
+ * frontmatter CRLF fixes.
+ */
+function splitLines(content: string): string[] {
+  return content.split(/\r?\n/);
+}
+
+// --- Normalization ---
+
+function normalizeKey(raw: string): string {
+  return raw
+    .replace(/`/g, "")
+    .replace(/\*\*?/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Strips the decoration authors put around table values so that bolded, backticked and bare
+ * spellings of the same word compare equal. Leading dashes are dropped because "— (omit from
+ * changelog)" is a conventional way to write an empty cell.
+ */
+function normalizeValue(raw: string): string {
+  return raw
+    .replace(/`/g, "")
+    .replace(/\*\*?/g, "")
+    .replace(/^[\s—–-]+/, "")
+    .replace(/[()]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function buildVocabulary(convention: DeclaredConvention): string[] {
+  const vocabulary = new Set<string>();
+  for (const value of Object.values(convention.mapping)) {
+    vocabulary.add(normalizeValue(value));
+  }
+  // Longest first so "omit from changelog" resolves to "omit" rather than a shorter prefix.
+  return [...vocabulary].sort((a, b) => b.length - a.length);
+}
+
+/**
+ * Resolves a member's phrasing to a declared value, or null when it matches none.
+ *
+ * Null is deliberately *not* treated as a contradiction. "— (omit from changelog)" and "Omit"
+ * are the same rule in different prose, and reporting that as a conflict would make the check
+ * fire on correct skillsets. Only a value that resolves to a *different* declared value is an
+ * error; anything unrecognized is a warning the author can fix by matching the declaration.
+ */
+function resolveAgainstVocabulary(normalized: string, vocabulary: string[]): string | null {
+  for (const candidate of vocabulary) {
+    if (normalized === candidate) return candidate;
+  }
+  for (const candidate of vocabulary) {
+    if (normalized.startsWith(`${candidate} `)) return candidate;
+  }
+  return null;
+}
