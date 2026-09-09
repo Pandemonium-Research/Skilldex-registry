@@ -7,6 +7,7 @@ import {
   updateSkillset,
   deleteSkillset,
 } from "../db/skillsets.js";
+import { refreshSkillsetCount } from "../db/stats.js";
 import { fetchSkillsetFromGitHub, type SkillsetMetadata } from "../github/fetch-skillset.js";
 import { validateSkillset, SKILLSET_SPEC_VERSION } from "../validator/skillset.js";
 import {
@@ -75,6 +76,25 @@ async function computeCoherence(metadata: SkillsetMetadata): Promise<CoherenceOu
       members
     ),
   };
+}
+
+/**
+ * Bring `skillsets_total` back in line after a row was added or removed.
+ *
+ * Needed because the nightly seeder is the only other writer of that key, so between runs — and
+ * entirely, while the seeder is paused — a publish would otherwise leave the listing reporting a
+ * total it labels exact and that is wrong. PATCH does not call this: it never changes the count.
+ *
+ * Failure is logged, never propagated. The row is already committed by the time this runs, so a
+ * stats error surfacing as a 500 would tell publishers their publish failed when it succeeded.
+ * The recount is idempotent, so the next publish repairs whatever this call missed.
+ */
+async function syncSkillsetCount(after: string): Promise<void> {
+  try {
+    await refreshSkillsetCount();
+  } catch (err) {
+    console.error(`[stats] skillsets_total not refreshed after ${after}:`, err);
+  }
 }
 
 // POST /skillsets — submit a new skillset to the registry
@@ -147,6 +167,8 @@ skillsetsPublishRoutes.post("/", requireAuth, async (c) => {
     members_coherent: outcome.coherence.membersCoherent,
     coherence: outcome.coherence,
   });
+
+  await syncSkillsetCount("publish");
 
   return c.json(
     {
@@ -244,6 +266,7 @@ skillsetsPublishRoutes.delete("/:name", requireAuth, async (c) => {
   }
 
   await deleteSkillset(name);
+  await syncSkillsetCount("delete");
 
   return c.json({ success: true });
 });
