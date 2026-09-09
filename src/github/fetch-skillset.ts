@@ -145,6 +145,19 @@ function parseGitHubUrl(url: string): {
   return { owner, repo };
 }
 
+/**
+ * Ceiling on a single GitHub call, because these run inside a request.
+ *
+ * A publish makes one call per member plus one per shared asset, and a bare fetch has no timeout
+ * of its own: one stalled connection would hold the function until the platform killed it, turning
+ * a transient network fault into a five-minute occupancy and an unexplained 504. With a ceiling the
+ * same fault surfaces as the 422 the route already knows how to report.
+ *
+ * Deliberately no rate-limit retry, unlike src/github/fetch.ts — that one backs off with sleeps,
+ * which is right for the seeder and wrong for anything a caller is waiting on.
+ */
+const FETCH_TIMEOUT_MS = 8000;
+
 async function fetchFileContent(
   owner: string,
   repo: string,
@@ -153,7 +166,10 @@ async function fetchFileContent(
   headers: Record<string, string>
 ): Promise<string | null> {
   const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${ref}`;
-  const response = await fetch(url, { headers });
+  const response = await fetch(url, {
+    headers,
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
 
   if (!response.ok) return null;
 
@@ -174,7 +190,10 @@ async function fetchDirectoryListing(
   headers: Record<string, string>
 ): Promise<string[]> {
   const treeUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${ref}?recursive=1`;
-  const response = await fetch(treeUrl, { headers });
+  const response = await fetch(treeUrl, {
+    headers,
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
 
   if (!response.ok) return [];
 

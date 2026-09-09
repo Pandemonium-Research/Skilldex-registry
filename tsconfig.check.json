@@ -6,11 +6,15 @@
   // in scripts/seed.ts passed `npm run typecheck` cleanly and only surfaced when the seeder was
   // actually run. rootDir is widened here purely so the wider include is legal; nothing is
   // emitted, so it has no effect on the build.
+  //
+  // api/ was missed when that was fixed, leaving the Vercel entrypoint — the one file whose shape
+  // decides whether anything is served at all — checked by no project at all. Its adapter was
+  // mismatched with the runtime for the life of the deployment and nothing ever said so.
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": ".",
     "noEmit": true
   },
-  "include": ["src/**/*", "scripts/**/*", "tests/**/*"],
+  "include": ["src/**/*", "scripts/**/*", "tests/**/*", "api/**/*"],
   "exclude": ["node_modules", "dist"]
 }
