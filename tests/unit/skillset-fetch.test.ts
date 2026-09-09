@@ -117,9 +117,10 @@ describe("SkillsetMetadata.readFile", () => {
   });
 
   it("returns null rather than rejecting when the request itself fails", async () => {
-    // fetchFileContent only maps an HTTP error to null; a transport failure throws out of fetch.
-    // Coherence reads members in a loop with no try/catch, so a rejection here would abort a
-    // publish that should have been refused with a diagnosable 422.
+    // Two different failures reach readFile and both must become null: a transport error thrown
+    // out of fetch, and the HTTP errors fetchFileContent raises so SKILLSET.md can report them
+    // (see skillset-fetch-errors.test.ts). Coherence reads members in a loop with no try/catch,
+    // so a rejection here would abort a publish that should have been refused with a 422.
     stubGitHub({ "a/SKILL.md": "# a\n" }, { throwOn: "/contents/devset/a/SKILL.md" });
 
     const md = await fetchSkillsetFromGitHub(SOURCE_URL);
