@@ -44,8 +44,10 @@ export async function fetchSkillsetFromGitHub(sourceUrl: string): Promise<Skills
 
   // Memoized blob reader over these coordinates. The promise is cached rather than its result so
   // concurrent reads of the same path share one request. `.catch` keeps the contract callers rely
-  // on — null for unreadable, never a rejection — since fetch throws on a transport error where
-  // fetchFileContent only returns null for an HTTP one.
+  // on — null for unreadable, never a rejection — and it now absorbs two kinds of failure: a
+  // transport error thrown by fetch, and the HTTP errors fetchFileContent raises so the SKILLSET.md
+  // read can report them. Coherence walks members in a loop with no try/catch and treats null as
+  // "skip", so a rejection here would abort a publish that should have been refused with a 422.
   const blobs = new Map<string, Promise<string | null>>();
   const readFile = (relPath: string): Promise<string | null> => {
     let pending = blobs.get(relPath);
@@ -62,9 +64,12 @@ export async function fetchSkillsetFromGitHub(sourceUrl: string): Promise<Skills
   const skillsetMdPath = `${basePath}SKILLSET.md`;
   const skillsetMdContent = await fetchFileContent(owner, repo, ref, skillsetMdPath, headers);
 
+  // Reached only when GitHub answered 200 with something that is not base64 file content — a
+  // directory at that path, say. Every HTTP failure has already thrown with its status and
+  // GitHub's own explanation, which is what the publisher actually needs to see.
   if (!skillsetMdContent) {
     throw Object.assign(
-      new Error(`Could not fetch SKILLSET.md from ${sourceUrl}`),
+      new Error(`SKILLSET.md at ${sourceUrl} is not a readable file`),
       { code: "FETCH_FAILED" }
     );
   }
@@ -158,6 +163,49 @@ function parseGitHubUrl(url: string): {
  */
 const FETCH_TIMEOUT_MS = 8000;
 
+/**
+ * Read GitHub's own explanation out of an error response.
+ *
+ * Every non-OK reply from the REST API carries a `message`, and it is usually the whole diagnosis:
+ * a 403 for an org policy names the policy and links the setting to change. Returns undefined
+ * rather than throwing for a body that is not the expected JSON — an error path must not be able
+ * to fail on its way to being reported.
+ */
+async function readGitHubMessage(response: Response): Promise<string | undefined> {
+  try {
+    const body = (await response.json()) as { message?: unknown };
+    return typeof body.message === "string" && body.message ? body.message : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Turn a non-OK GitHub response into an error that says what went wrong.
+ *
+ * The status alone separates the cases a publisher can act on — 404 is a wrong path, 403 a
+ * permission or policy refusal, 429 a rate limit — and they are indistinguishable once collapsed
+ * to "could not fetch". `code` stays FETCH_FAILED so existing handling is unchanged; `status` is
+ * added for callers that want to branch on it.
+ */
+async function githubFailure(response: Response, what: string) {
+  const detail = await readGitHubMessage(response);
+  return Object.assign(
+    new Error(`GitHub returned ${response.status} for ${what}${detail ? `: ${detail}` : ""}`),
+    { code: "FETCH_FAILED" as const, status: response.status }
+  );
+}
+
+/**
+ * Fetch one file's contents.
+ *
+ * Throws on a non-OK response rather than returning null, so the reason survives to the caller.
+ * `readFile` maps that back to null to keep its own contract; the SKILLSET.md read lets it
+ * propagate, because a publish that cannot read the manifest should say why.
+ *
+ * null is still returned for a 200 whose payload is not base64 content, which is a malformed
+ * success rather than a failure and has no status to report.
+ */
 async function fetchFileContent(
   owner: string,
   repo: string,
@@ -171,7 +219,7 @@ async function fetchFileContent(
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
 
-  if (!response.ok) return null;
+  if (!response.ok) throw await githubFailure(response, path);
 
   const data = (await response.json()) as { content?: string; encoding?: string };
 
@@ -182,6 +230,15 @@ async function fetchFileContent(
   return null;
 }
 
+/**
+ * List every file in the skillset.
+ *
+ * Also throws on a non-OK response, and the reason to is stronger than for a single file: members
+ * are discovered from this listing, so an empty one is not an error anywhere downstream. It is a
+ * skillset that appears to have no members — it would validate, score, publish with zero members
+ * and report coherence 0/0, all from a request that failed. Refusing is the only safe reading,
+ * since a genuinely empty repository cannot produce a publishable skillset either.
+ */
 async function fetchDirectoryListing(
   owner: string,
   repo: string,
@@ -195,7 +252,7 @@ async function fetchDirectoryListing(
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
 
-  if (!response.ok) return [];
+  if (!response.ok) throw await githubFailure(response, `the file listing for ${ref}`);
 
   const data = (await response.json()) as {
     tree: Array<{ path: string; type: string }>;
