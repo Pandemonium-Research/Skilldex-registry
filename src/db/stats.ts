@@ -32,6 +32,18 @@ export interface RegistryStats {
   updated_at: string | null;
 }
 
+/**
+ * Read every stat, reporting the age of the *stalest* one.
+ *
+ * `updated_at` exists so callers can judge how much to trust these numbers, which makes the oldest
+ * timestamp the only honest answer: a reader wants "nothing here is older than this".
+ *
+ * It used to take the newest, which was equivalent while refreshStats() was the only writer and
+ * stamped every key together. refreshSkillsetCount() breaks that — it freshens one key on each
+ * publish — and under the newest rule a single publish would drag `updated_at` to now and present
+ * skills counts from the last nightly run as though they had just been recomputed. That is exactly
+ * backwards for a field whose stated purpose is making staleness observable.
+ */
 export async function readStats(client?: Client): Promise<RegistryStats> {
   const db = client ?? getDb();
   const r = await db.execute("SELECT key, value, updated_at FROM registry_stats");
@@ -42,7 +54,7 @@ export async function readStats(client?: Client): Promise<RegistryStats> {
   for (const row of r.rows) {
     values[String(row.key) as StatKey] = Number(row.value);
     const at = row.updated_at === null ? null : String(row.updated_at);
-    if (at && (!updated_at || at > updated_at)) updated_at = at;
+    if (at && (!updated_at || at < updated_at)) updated_at = at;
   }
 
   return { values, updated_at };
@@ -99,6 +111,37 @@ export async function refreshStats(client?: Client): Promise<Record<string, numb
   );
 
   return computed;
+}
+
+/**
+ * Recount just `skillsets_total` and write it.
+ *
+ * `skillsets_total` is not only a headline figure: searchSkillsets uses it as the pagination
+ * `total` for any unfiltered listing, and labels that `total_relation: "eq"`. A stale value is
+ * therefore an exact-looking lie — with the nightly seeder paused, publishing the three official
+ * skillsets left the endpoint returning three rows above a total of 0.
+ *
+ * A recount rather than an increment, for two reasons. It is idempotent, so a missed call site, a
+ * failed write, or a row deleted straight from the database heals on the next publish, where an
+ * increment would drift permanently. And it is affordable: the >90s `count(*)` that made all of
+ * this precomputed is a property of the 1.6M-row `skills` table, not of `skillsets`, which is
+ * small by construction — a skillset is hand-authored and published one at a time, not imported
+ * in bulk.
+ *
+ * Only this one key is touched. refreshStats() recomputes everything including
+ * `count(DISTINCT owner)`, which is minutes at corpus scale and has no business on a request path.
+ */
+export async function refreshSkillsetCount(client?: Client): Promise<number> {
+  const db = client ?? getDb();
+  const r = await db.execute("SELECT count(*) AS n FROM skillsets");
+  const n = Number(r.rows[0].n);
+
+  await db.execute({
+    sql: "INSERT OR REPLACE INTO registry_stats (key, value, updated_at) VALUES (?, ?, ?)",
+    args: ["skillsets_total", n, new Date().toISOString()],
+  });
+
+  return n;
 }
 
 /**
