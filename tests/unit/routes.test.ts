@@ -1,17 +1,30 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { Hono } from "hono";
 import { healthRoutes } from "../../src/routes/health.js";
 
 describe("Health route", () => {
   const app = new Hono();
   app.route("/health", healthRoutes);
+  const ORIGINAL_SHA = process.env.VERCEL_GIT_COMMIT_SHA;
 
-  it("returns ok status", async () => {
+  afterEach(() => {
+    if (ORIGINAL_SHA === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = ORIGINAL_SHA;
+  });
+
+  it("returns ok status, with no commit outside Vercel", async () => {
+    delete process.env.VERCEL_GIT_COMMIT_SHA;
     const res = await app.request("/health");
     expect(res.status).toBe(200);
 
     const body = (await res.json()) as any;
-    expect(body).toEqual({ status: "ok", version: "1.0.0" });
+    expect(body).toEqual({ status: "ok", version: "1.0.0", commit: null });
+  });
+
+  it("reports the deployed commit, so a deploy that lags main is visible", async () => {
+    process.env.VERCEL_GIT_COMMIT_SHA = "fc54e59d0c1ab2345678901234567890abcdef12";
+    const body = (await (await app.request("/health")).json()) as any;
+    expect(body.commit).toBe("fc54e59d0c1ab2345678901234567890abcdef12");
   });
 });
 
