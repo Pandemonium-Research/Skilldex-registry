@@ -611,6 +611,60 @@ the ceiling ceasing to bind so a plain index becomes affordable.
 
 ---
 
+## D20 — The nightly sync watches the corpus by polling, and prioritises by evidence
+
+Decided 2026-09-07. The plan is [REGISTRY_SEED_PLAN.md](REGISTRY_SEED_PLAN.md).
+
+The registry holds skills from **220,607 repositories** (FINDINGS §14); the seeder watches 17. One
+REST call per repository is ~44 hours per pass, so the existing design cannot run nightly.
+
+1. **No webhooks for the corpus — polling is the only mechanism, not a preference.** GitHub delivers
+   push events only to a webhook a repository admin created or an App an admin installed, and
+   watching a repository does not notify on push. We administer none of 158,915 owners. A GitHub App
+   is worth building for deliberate *publishers* — as a publishing feature, not corpus freshness.
+2. **Detection and fetch are separate.** Detection — did the repository move — by a GraphQL sweep
+   aliasing ~100 `repository` lookups per query, ~2,207 queries for the corpus (estimated). Fetch —
+   what moved — by `/compare/{old}...{new}`, which returns changed paths and reports deletions.
+3. **Priority comes from measured properties, never provenance.** Observed change rate, demand and
+   recency, in one function over every repository. The 17 in `watched_repos` are the small corpus
+   that happened to be on hand before the import, **not a curated set**, and must not become a
+   permanent tier. Their hand-assigned `trust_tier` and `tags` are metadata labelling and do not
+   leak into crawl priority. This is the same error as defaulting search to those rows (FINDINGS §9,
+   the revision on D16), caught a second time.
+4. **A separate freshness ledger** (`repo_heads`); `watched_repos` stays the editorial layer.
+5. **Phase 8 lands first.** A `source_url` mismatch would make the first sweep treat the whole
+   corpus as new, and each insert fires the FTS5 triggers across two tables.
+
+Two numbers gate the design and neither is measured: the daily change rate, and the real GraphQL
+point cost of a batched query. The 1-point-per-query figure is inferred from GitHub's formula, not
+read as stated.
+
+**What would reverse this.** GitHub offering push notification for public repositories one does not
+administer; or the cost probe showing per-alias charging, which moves detection to GH Archive.
+
+---
+
+## D21 — The rollback database stays, and is migrated before any repoint
+
+Decided 2026-09-07. The procedure is [CAUTION.md](CAUTION.md).
+
+`skilldex-registry-v2` is live; `skilldex-registry` is kept as the rollback and must not be deleted.
+But migration 004 (skillset coherence) was applied to v2 on 2026-09-07 and never to the rollback, so
+repointing at it no longer yields a working API. The failure is partial — plain skillset listing
+degrades to nulls while publish, `sort=coherence` and `min_coherence` return 500 — so a smoke test
+can pass.
+
+**Decision.** A rollback migrates the old database first, then repoints both `TURSO_DATABASE_URL` and
+`TURSO_AUTH_TOKEN` (tokens are per database). `migrate --dry-run` against it lists whatever is
+missing, so the procedure stays correct as migrations accumulate.
+
+**Recommended, not adopted:** apply schema-only migrations to both databases while the rollback is
+still a rollback. 004 took 5 seconds.
+
+**What would reverse this.** Retiring the rollback database once confidence in v2 is established.
+
+---
+
 ## What this migration loses
 
 Recorded honestly, so none of it is discovered later as a surprise.

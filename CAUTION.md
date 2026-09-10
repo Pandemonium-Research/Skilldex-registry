@@ -19,6 +19,9 @@ to v2 that it never received.
 **004 (`skillset_coherence`) was applied to v2 on 2026-09-07 and has never been applied to
 the rollback database.**
 
+**Since 2026-09-09 v2 also holds data the rollback lacks** — the three official skillsets, with
+coherence 4/4, 3/3 and 2/2. A rollback loses them as well as breaking the paths below.
+
 Repointing the environment variables at the old database *without migrating it first* gives
 you a running API on a schema that is missing columns the code requires.
 

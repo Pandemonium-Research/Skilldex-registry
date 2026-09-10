@@ -22,11 +22,11 @@ Effort figures are estimates, not commitments.
 | **3** | Port `seed.ts` to Turso **and** kill the global preload | 1d | ✅ done |
 | **4** | Import the corpus | 2d | ✅ **done — cut over, serving 1,615,322 skills** |
 | **4b** | Counting fix, curated split, browse redesign | 2d | ✅ **done and deployed** |
-| **5** | Freshness #1+2 — repo SHA polling, compare diffs | 1.5d | ⬜ |
-| **6** | Freshness #4+5 — verify-on-read, priority queue | 1d | ⬜ |
+| **5** | Freshness #1+2 — repo SHA polling, compare diffs | 1.5d | ⬜ — planned in [REGISTRY_SEED_PLAN.md](REGISTRY_SEED_PLAN.md) (D20) |
+| **6** | Freshness #4+5 — verify-on-read, priority queue | 1d | ⬜ — planned in [REGISTRY_SEED_PLAN.md](REGISTRY_SEED_PLAN.md) (D20) |
 | **7** | Opt-out / takedown path | 1d | ✅ **done** — was the gate on the corpus going live |
-| **8** | Realign the nightly seeder with the imported corpus | 1–1.5d | ⬜ |
-| **9** | Free-text search latency at corpus scale | 1d | ⬜ **next** — 13s cold, 0.10s warm |
+| **8** | Realign the nightly seeder with the imported corpus | 1–1.5d | ⬜ **blocks the corpus sweep** — three `source_url` producers now (FINDINGS §14) |
+| **9** | Free-text search latency at corpus scale | 1d | ⬜ **next** — 3–21s cold, `test` 504s at 30s (FINDINGS §14) |
 
 ---
 
@@ -288,7 +288,7 @@ D15–D17; measurements in FINDINGS §5–§8; background in
       quota-bound sweep into a wall-clock-bound one
 - [ ] On a moved SHA, `GET /compare/{old}...{new}` — process only changed paths, and handle
       deletions, which gives the dead-link reaper for free
-- [ ] Sizing: the corpus spans **282,200 repos**, not 1.61M skills. That is the unit count
+- [ ] Sizing: the corpus spans **282,200 repos** *(raw dataset; the built registry holds 220,607 — FINDINGS §14)*, not 1.61M skills. That is the unit count
       that makes a regular sweep feasible at all
 
 ---

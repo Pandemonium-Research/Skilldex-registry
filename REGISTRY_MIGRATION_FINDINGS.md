@@ -921,3 +921,30 @@ stays authoritative until it is deliberately retired. **Do not delete it.**
 land before it runs against the corpus — specifically the `source_url` reconciliation, where a
 mismatch of one trailing slash makes every imported watched-repo skill look new and get
 re-inserted.
+
+---
+
+## 14. After cutover, 2026-09-07 to 2026-09-10
+
+**The corpus spans 220,607 repositories, not 282,200.** Measured from `source_url` in the built
+artifact; all 1,615,322 rows are GitHub URLs, none skipped. Phase 5's 282,200 counted the raw GitSkills
+dataset before dedup, delistings and name resolution. 220,607 is what the registry holds and what the
+nightly sync has to keep fresh (D20).
+
+**Migration 004 was applied to v2 on 2026-09-07** — four `ALTER TABLE skillsets` and an index, in 5
+seconds, because it touches the empty `skillsets` table rather than the 1.6M-row `skills`. Verified by
+re-reading: `coherence_pct` is a VIRTUAL generated column, so `pragma_table_info` omits it and only
+`pragma_table_xinfo` shows it (`hidden = 2`); checking the obvious pragma reports a successful
+migration as failed. By 2026-09-09 production held the three official skillsets with coherence 4/4,
+3/3 and 2/2. The rollback database has neither the columns nor the rows (D21, CAUTION.md).
+
+**Three producers of `source_url`, two conventions.** `skillpm publish` (since `Skilldex@b10d05d`) and
+the seeder write `tree/{branch}`; the importer writes `tree/HEAD` (D14). Phase 8's reconciliation is
+now two against one. Publish's subpath was also wrong whenever the project was reached through a
+symlink — it sent the bare repository URL, which 404s here and fails the publish with a 422. Fixed in
+`skilldex-cli@1.4.3`.
+
+**Search is slower and less reliable than §11 recorded.** The E4 probe (Skilldex-EMNLP, 2026-09-10)
+measured cold searches at 3.3–21s, and `test` returned 504 twice at the 30s ceiling. Every distinct
+`(q, limit)` pair is its own cache key, and a client abort cancels the server work. The pre-warm lever
+and the trust-tier ranking gap are recorded in [BACKLOG.md](BACKLOG.md).

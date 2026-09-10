@@ -284,6 +284,11 @@ Both are cheap. Neither should be assumed.
 `tree/{branch}`; the importer builds `tree/HEAD` (D14). A mismatch of one path segment makes
 every imported watched-repo skill look new.
 
+*Updated 2026-09-10:* there is a third producer. `skillpm publish` (since `Skilldex@b10d05d`) writes
+`<remote>/tree/<branch>/<subpath>`, correct through symlinked paths since `skilldex-cli@1.4.3`. Two of
+three producers use `tree/{branch}`; the importer's `tree/HEAD` is the odd one out, which bears on
+which form Phase 8 standardises on.
+
 At corpus scale that is not a cosmetic bug. Each insert or update fires the FTS5 triggers
 across two tables — the corpus build deferred those triggers deliberately, because 1.6M
 firings dominate every other cost. A first sweep that believes the whole corpus is new would
