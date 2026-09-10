@@ -55,15 +55,30 @@ export function resolveSort(requested: string | undefined, hasQuery: boolean): s
  * `OR`, `NEAR` and friends, so passing a search box straight through would turn
  * `size 10" pipe` into a 500. Postgres `websearch_to_tsquery` swallowed all of that.
  *
- * Each token is stripped to word characters and wrapped as an FTS5 string literal, then
- * ANDed — matching websearch's default of "all terms must appear". Returns null when nothing
- * survives, and callers treat that as "no text filter" rather than "match nothing", so a
- * query of only punctuation lists results instead of returning an empty page.
+ * The query is split on *runs of non-word characters*, and each surviving run of word
+ * characters is wrapped as an FTS5 string literal, then ANDed — matching websearch's default
+ * of "all terms must appear". Returns null when nothing survives, and callers treat that as
+ * "no text filter" rather than "match nothing", so a query of only punctuation lists results
+ * instead of returning an empty page.
+ *
+ * Splitting rather than deleting is the whole point, and it was the bug. This used to split on
+ * whitespace and then strip non-word characters *inside* each token, which glued hyphenated
+ * words together: `skillset-creator` became the single term `skillsetcreator`. FTS5's tokenizer
+ * splits on the hyphen when it builds the index, so that glued token is in no index and the
+ * published `skillset-creator` skillset could not be found by its own name — while
+ * `skillset creator`, with a space, found it at once.
+ *
+ * kebab-case is mandated for skill names, so this made the registry unable to find a skill by
+ * the exact format the specification requires. It also failed quietly rather than loudly:
+ * `conventional-commit` returned the 15 documents containing the literal glued token instead of
+ * the 8,122 matching the two words, which reads as a working search returning a narrow result.
+ *
+ * Splitting also makes the terms safe by construction — a run of `[\p{L}\p{N}_]` cannot contain
+ * any character FTS5 treats as syntax, so the stripping step this replaced is not needed.
  */
 export function toFtsQuery(q: string): string | null {
   const terms = q
-    .split(/\s+/)
-    .map((t) => t.replace(/[^\p{L}\p{N}_]/gu, ""))
+    .split(/[^\p{L}\p{N}_]+/u)
     .filter(Boolean)
     .map((t) => `"${t}"`);
 
