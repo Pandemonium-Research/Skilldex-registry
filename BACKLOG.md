@@ -170,3 +170,80 @@ is being replicated by some mechanism rather than chosen, the redistribution met
 measuring the mechanism, not interest.
 
 **Sizing.** Small: sample and read a few dozen SKILL.md files from each account.
+
+---
+
+## Pre-warm the popular query vocabulary
+
+**Status:** open, sized, not started. Raised 2026-09-10 from the CLI-side suggest work.
+
+**The problem.** Cold search is slow enough to shape what can be built on it. Measured against
+production on 2026-09-10 (`Skilldex-EMNLP/experiments/E4_search_suggest/probe_registry_behaviour.py`,
+read-only):
+
+| Query | matches | cold | warm |
+|---|---|---|---|
+| `terraform` | 4,471 | 3.3s | 0.12s |
+| `express` | 9,050 | 7.2s | 0.11s |
+| `typescript` | 10,000 (capped) | 11.3s | 0.12s |
+| `python` | 10,000 (capped) | 21.0s | 0.12s |
+
+Warm is roughly 100× faster. `vercel.json` caps a function at 30s, and queries near that ceiling —
+`test`, `the`, `write`, `a` — return 504 outright.
+
+**Why this is tractable where general search latency is not.** Solving cold FTS across 1.6M rows is
+the hard, open problem (see *Semantic search* above). But `skillpm suggest` does not issue general
+queries. It issues **dependency names**, derived from the project's manifests, and dependency names
+across projects are heavily power-law distributed: `express`, `react`, `vitest`, `commander`,
+`yaml`, `zod`. A few hundred names cover most projects.
+
+**The lever.** A scheduled job that issues the top few hundred package names **at the exact limit
+the client uses** would make the median suggest run fast without touching the query path. The limit
+matters and is the easy thing to get wrong: the cache key is the precise `(q, limit)` pair, so
+warming `express` at limit 20 does nothing for a client asking at limit 10. The CLI pins
+`RESULTS_PER_QUERY = 10` (`Skilldex/src/core/suggest-retrieval.ts`) specifically so this is
+warmable; any job must use the same number and change with it.
+
+**What it does not fix.** A completed response caches; a **504 does not**. A query near the ceiling
+can fail repeatedly, leaving the cache as cold as before — measured for `test`, which 504'd on two
+consecutive attempts at one cache key and cached fine at another once a request finished. So a
+warming job needs retries and cannot guarantee coverage of the slowest terms.
+
+**Sizing.** Small: a list of package names, one scheduled function, no schema change.
+
+**When to pick up.** Before `skillpm suggest` is promoted as a headline feature — it is the
+difference between a ~15s command and a ~1s one for most users.
+
+---
+
+## Ranking ignores the trust tier
+
+**Status:** open, measured 2026-09-10. Distinct from *Result ordering after a bulk import* above,
+which concerns the default sort when **no** query is present; this is about relevance ranking when
+one **is**.
+
+**The problem.** The registry maintains a `verified` tier and text-query ranking makes no use of
+it. Measured across five ordinary queries, top 15 each:
+
+| Query | verified in top 15 | `?tier=verified` total |
+|---|---|---|
+| `vitest` | 0 | 0 |
+| `terraform` | 0 | 0 |
+| `express` | 0 | 0 |
+| `typescript` | 0 | 0 (504'd at 30.4s on an earlier run) |
+| `python` | 0 | 1 — a spreadsheet skill |
+
+Earlier, for `q=pdf`: `anthropics/pdf` is **not in the top 100**, and zero verified skills appear
+there, while `anthropics/pdf` and `anthropics/docx` both exist and are verified. At pool scale, a
+fan-out of eight dependency-name queries returned **64 distinct candidates, none verified**.
+
+**Why filtering is not the workaround.** `?tier=verified` returns nothing for four of five queries
+while still paying to scan the same corpus — 21.8s for `python`. Surfacing verified separately in a
+UI is therefore not available either: there is nothing to surface.
+
+**What this blocks.** Any consumer that wants to prefer trustworthy results is preferring among a
+set that contains none. The CLI's own candidate ranking carries a verified preference that is, in
+practice, a no-op.
+
+**Sizing.** Unknown until the intent is decided — a tier boost in the ORDER BY is small; deciding
+what the tier should *mean* against a 1.6M-row imported corpus is not.
