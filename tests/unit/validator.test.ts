@@ -65,7 +65,11 @@ describe("validateSkill — scoring", () => {
     expect(result.score).toBe(PERFECT - W.descriptionLength); // 94
     const descDiag = result.diagnostics.find((d) => d.message.includes("words"));
     expect(descDiag).toBeDefined();
-    expect(descDiag!.level).toBe("error");
+    // A warning since the rubric was shared: the specification sets no word minimum, so thirty
+    // words is Skilldex's recommendation and `skillpm validate` has reported it as a warning since
+    // 1.5.0. The copy this file used to test still called it an error. The score is unchanged
+    // either way — points are awarded on pass — and publish does not gate on level.
+    expect(descDiag!.level).toBe("warning");
   });
 
   it("charges only nameFormat for a non-kebab-case name", () => {
@@ -147,7 +151,7 @@ describe("validateSkill — scoring", () => {
     });
 
     expect(result.score).toBe(PERFECT - W.bundledResourcesCorrect); // 98 — not 2x
-    const misplaced = result.diagnostics.filter((d) => d.message.includes("found in"));
+    const misplaced = result.diagnostics.filter((d) => d.message.includes("misplaced"));
     expect(misplaced).toHaveLength(2);
     expect(misplaced.every((d) => d.level === "warning")).toBe(true);
   });
@@ -169,7 +173,7 @@ describe("validateSkill — scoring", () => {
     const result = validateSkill({ skillMd, files: [] });
 
     expect(result.score).toBe(PERFECT); // warns, costs nothing
-    const lineDiag = result.diagnostics.find((d) => d.message.includes("warning threshold"));
+    const lineDiag = result.diagnostics.find((d) => d.message.includes("approaching"));
     expect(lineDiag).toBeDefined();
     expect(lineDiag!.level).toBe("warning");
   });
