@@ -32,22 +32,26 @@
  *   npm run rescore -- --restart             — ignore any checkpoint and start from the top
  *   npm run rescore -- --from=m --to=z       — only process skills with m <= name < z
  *
- * Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
- * Optional:          GITHUB_TOKEN (raises GitHub API rate limit to 5000/hr)
+ * Scope: curated rows only (source <> 'imported'). The imported corpus is scored at import
+ * time by scripts/corpus/build.ts from the dataset's own file lists, and re-scoring it here
+ * would mean a GitHub round trip per row plus an UPDATE that fires skills_au and rewrites
+ * both FTS5 tables for each one (see the note at the foot of
+ * schema/sqlite/002_source_and_stats.sql). Rebuild and swap instead. --include-imported
+ * exists for a deliberate, narrow repair, never a bulk pass.
+ *
+ * Required env vars: TURSO_DATABASE_URL
+ * Optional:          TURSO_AUTH_TOKEN, GITHUB_TOKEN (raises GitHub API rate limit to 5000/hr)
  */
 
 import { readFile, writeFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createClient } from "@supabase/supabase-js";
+import { getDb } from "../src/db/client.js";
 import { fetchSkillFromGitHub, findRelocatedSkill, type SkillMetadata } from "../src/github/fetch.js";
 import { validateSkill } from "../src/validator/index.js";
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+if (!process.env.TURSO_DATABASE_URL) {
+  console.error("Missing TURSO_DATABASE_URL");
   process.exit(1);
 }
 
@@ -61,13 +65,14 @@ const DRY_RUN = process.argv.includes("--dry-run");
 const RESTART = process.argv.includes("--restart");
 const RANGE_FROM = getArg("--from"); // inclusive
 const RANGE_TO = getArg("--to"); // exclusive
+const INCLUDE_IMPORTED = process.argv.includes("--include-imported");
 
 if (RANGE_FROM && RANGE_TO && RANGE_FROM >= RANGE_TO) {
   console.error(`--from (${RANGE_FROM}) must sort before --to (${RANGE_TO})`);
   process.exit(1);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const db = getDb();
 
 // Delay between GitHub API calls to stay within rate limits.
 // 300ms → ~200 req/min, well within the 5000/hr authenticated limit.
@@ -91,19 +96,35 @@ const CHECKPOINT_PATH = path.join(
   `.rescore-checkpoint${DRY_RUN ? ".dryrun" : ""}${rangeSuffix}.json`
 );
 
-async function loadCheckpoint(): Promise<string | null> {
+/** Where a run stopped. Both halves, for the reason loadAllSkills explains. */
+interface Checkpoint {
+  lastProcessedName: string;
+  lastProcessedOwner: string;
+}
+
+async function loadCheckpoint(): Promise<Checkpoint | null> {
   if (RESTART) return null;
   try {
     const raw = await readFile(CHECKPOINT_PATH, "utf8");
-    const parsed = JSON.parse(raw) as { lastProcessedName?: string };
-    return parsed.lastProcessedName ?? null;
+    const parsed = JSON.parse(raw) as Partial<Checkpoint>;
+    // A checkpoint written before the owner half existed cannot say where the run stopped,
+    // because names repeat across owners. Start over rather than skip work.
+    if (!parsed.lastProcessedName || !parsed.lastProcessedOwner) return null;
+    return {
+      lastProcessedName: parsed.lastProcessedName,
+      lastProcessedOwner: parsed.lastProcessedOwner,
+    };
   } catch {
     return null;
   }
 }
 
-async function saveCheckpoint(name: string): Promise<void> {
-  await writeFile(CHECKPOINT_PATH, JSON.stringify({ lastProcessedName: name }), "utf8");
+async function saveCheckpoint(name: string, owner: string): Promise<void> {
+  await writeFile(
+    CHECKPOINT_PATH,
+    JSON.stringify({ lastProcessedName: name, lastProcessedOwner: owner }),
+    "utf8"
+  );
 }
 
 async function clearCheckpoint(): Promise<void> {
@@ -123,30 +144,42 @@ interface SkillRow {
   score: number | null;
 }
 
-// PostgREST caps rows-per-request (commonly 1000) regardless of how many
-// actually match, so a plain .select() silently truncates on a table this
-// size. Page through with .range() until a page comes back short.
+// Keyset pagination, not OFFSET: with --include-imported this walks a 1.6M-row table, and a
+// growing OFFSET rescans everything it skips.
+//
+// Ordered by (name, owner), which is also what the checkpoint stores. Ordering by owner while
+// checkpointing on the name alone — what this did before — silently skipped work on resume:
+// once owner "a" finished at name "zebra", every later owner's skills sorting before "zebra"
+// looked already-done and were filtered out.
 async function loadAllSkills(): Promise<SkillRow[]> {
   const PAGE_SIZE = 1000;
   const skills: SkillRow[] = [];
-  let from = 0;
+  let afterName = "";
+  let afterOwner = "";
 
   while (true) {
-    const { data, error } = await supabase
-      .from("skills")
-      .select("owner, name, source_url, score")
-      .order("owner")
-      .order("name")
-      .range(from, from + PAGE_SIZE - 1);
+    const result = await db.execute({
+      sql: `SELECT owner, name, source_url, score
+              FROM skills
+             WHERE (name > ? OR (name = ? AND owner > ?))
+               ${INCLUDE_IMPORTED ? "" : "AND source <> 'imported'"}
+             ORDER BY name, owner
+             LIMIT ?`,
+      args: [afterName, afterName, afterOwner, PAGE_SIZE],
+    });
 
-    if (error) {
-      throw new Error(`Failed to load skills: ${error.message}`);
-    }
-    if (!data || data.length === 0) break;
+    const page: SkillRow[] = result.rows.map((r) => ({
+      owner: String(r.owner),
+      name: String(r.name),
+      source_url: String(r.source_url),
+      score: r.score === null ? null : Number(r.score),
+    }));
+    if (page.length === 0) break;
 
-    skills.push(...(data as SkillRow[]));
-    if (data.length < PAGE_SIZE) break;
-    from += PAGE_SIZE;
+    skills.push(...page);
+    if (page.length < PAGE_SIZE) break;
+    afterName = page[page.length - 1].name;
+    afterOwner = page[page.length - 1].owner;
   }
 
   return skills;
@@ -154,7 +187,13 @@ async function loadAllSkills(): Promise<SkillRow[]> {
 
 async function rescore() {
   const rangeLabel = RANGE_FROM || RANGE_TO ? ` [${RANGE_FROM ?? "start"}, ${RANGE_TO ?? "end"})` : "";
-  console.log(`Skilldex Registry — rescore all skills${DRY_RUN ? " (dry run)" : ""}${rangeLabel}\n`);
+  console.log(`Skilldex Registry — rescore skills${DRY_RUN ? " (dry run)" : ""}${rangeLabel}`);
+  console.log(
+    INCLUDE_IMPORTED
+      ? "scope: every row, imported included — one GitHub fetch each, and every write rewrites\n" +
+          "       both FTS5 tables. Narrow it with --from/--to; rebuild and swap for bulk work.\n"
+      : "scope: curated rows (source <> 'imported')\n"
+  );
 
   const allSkills = await loadAllSkills();
   const skills = allSkills.filter((s) => {
@@ -164,11 +203,17 @@ async function rescore() {
   });
 
   const checkpoint = await loadCheckpoint();
-  const toProcess = checkpoint ? skills.filter((s) => s.name > checkpoint) : skills;
+  const toProcess = checkpoint
+    ? skills.filter(
+        (s) =>
+          s.name > checkpoint.lastProcessedName ||
+          (s.name === checkpoint.lastProcessedName && s.owner > checkpoint.lastProcessedOwner)
+      )
+    : skills;
 
   if (checkpoint) {
     console.log(
-      `Resuming after "${checkpoint}" — ${skills.length - toProcess.length} already done this run, ${toProcess.length} remaining\n`
+      `Resuming after "${checkpoint.lastProcessedOwner}/${checkpoint.lastProcessedName}" — ${skills.length - toProcess.length} already done this run, ${toProcess.length} remaining\n`
     );
   } else {
     console.log(
@@ -231,21 +276,27 @@ async function rescore() {
       changed++;
 
       if (!DRY_RUN) {
-        const { error: updateError } = await supabase
-          .from("skills")
-          .update({
-            source_url: resolvedSourceUrl,
-            score: newScore,
-            description: metadata.description,
-            spec_version: metadata.spec_version,
-            updated_at: new Date().toISOString(),
-          })
-          // Scope by owner too: names are only unique within an owner, so filtering
-          // on name alone would rewrite every same-named skill in the registry.
-          .eq("owner", skill.owner)
-          .eq("name", skill.name);
-
-        if (updateError) {
+        try {
+          await db.execute({
+            // Scope by owner too: names are only unique within an owner, so filtering
+            // on name alone would rewrite every same-named skill in the registry.
+            sql: `UPDATE skills
+                     SET source_url = ?,
+                         score = ?,
+                         description = ?,
+                         spec_version = ?,
+                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                   WHERE owner = ? AND name = ?`,
+            args: [
+              resolvedSourceUrl,
+              newScore,
+              metadata.description,
+              metadata.spec_version,
+              skill.owner,
+              skill.name,
+            ],
+          });
+        } catch (updateError: any) {
           console.log(`    ✗ Failed to write update: ${updateError.message}`);
           failed++;
         }
@@ -254,7 +305,7 @@ async function rescore() {
       console.log(`  ✗ ${skill.name}: ${err.message}`);
       failed++;
     } finally {
-      await saveCheckpoint(skill.name);
+      await saveCheckpoint(skill.name, skill.owner);
     }
   }
 
