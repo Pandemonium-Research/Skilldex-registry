@@ -948,3 +948,68 @@ symlink — it sent the bare repository URL, which 404s here and fails the publi
 measured cold searches at 3.3–21s, and `test` returned 504 twice at the 30s ceiling. Every distinct
 `(q, limit)` pair is its own cache key, and a client abort cancels the server work. The pre-warm lever
 and the trust-tier ranking gap are recorded in [BACKLOG.md](BACKLOG.md).
+
+---
+
+## 15. Scoring drift, investigated 2026-09-15
+
+Three things were suspected of making stored scores wrong. One is ruled out by measurement; two are
+real.
+
+### Ruled out — the imported corpus was scored on the input the validator expects
+
+`scripts/corpus/build.ts:96` builds each skill's file list from `list(entry_name)` over
+`artifact_siblings`, and `validateSkill` matches a reference like `references/api.md` against that
+list literally. Had `entry_name` held bare filenames, the damage would have run in both directions:
+every skill referencing a bundled file loses the 7-point check, and the two checks that only fire on
+a path containing `/` — allowed subdirectories (4) and bundled files in the right folder (2) — pass
+everything in silence, including real violations. It would not have been correctable by arithmetic,
+since the error differs per skill.
+
+Measured over every shard of `artifact_siblings`, 5,858,945 entries of `entry_type = 'file'`:
+
+| | |
+|---|---|
+| entries containing `/` | 85.99% |
+| commonest prefixes | `references/` 1,447,176 · `scripts/` 631,050 · `assets/` 215,178 |
+| maximum depth | 16 |
+| entries starting `./` or `/`, or holding a backslash | 88 |
+
+`entry_name` is a path relative to the artifact directory, so the 14% without a slash are genuinely
+top-level files. **The 1.6M stored scores are computed from correct input, and no rebuild is needed
+on this account.**
+
+### Real — stored scores cannot be refreshed
+
+`rescore.ts` wrote to Supabase, which nothing has read since the 2026-09-06 cutover, and the nightly
+seeder never re-scores an existing row. Between them, an edited skill kept its first score
+permanently and there was no working repair path. The script is ported in D22; the seeder's policy
+is still open.
+
+### Real — the registry and the CLI score the same skill differently
+
+`src/validator/index.ts` says of itself that it "mirrors skilldex's src/core/validator.ts as of
+skillpm v1.1.2" and must be kept in sync by hand. The CLI is at 1.5.0, and the two had drifted.
+Converged in D23; what the divergence was:
+
+| Shape | Registry scored | skilldex scored |
+|---|---|---|
+| `[API](references/api.md#usage)`, file present | broken — the anchor counted as part of the name | resolved |
+| `` `scripts/build.sh --watch` ``, script present | broken — the flag counted as part of the name | resolved |
+| `[image](raw_image)` | not a reference | broken file |
+| `[x](../shared/notes.md)` | not a reference — it looked only inside the three bundled folders | resolved, if the file happened to sit beside the skill |
+| Skill at a repo root, beside `.git/` | fine | up to 4 points off for unknown subdirectories |
+| `references/setup/install.sh` | misplaced | fine — only the top level was checked |
+| `references/Setup.PY` | fine — compared case-sensitively | misplaced |
+| SKILL.md opening `--- ` | 0, read as having no frontmatter | scored normally |
+
+The measured effect, from the June 01b cross-check, was 81.4% exact agreement over 2,842 skills at a
+mean difference of 2.12 points, left as an open item at the time. Its largest group — 167 skills
+where the CLI scored 10–15 lower — is row three: skilldex counted every markdown link as a file
+reference, including targets that name no file.
+
+**The corpus meant to prevent this had the shapes but not the cases.** Its anchored, titled and
+inline-code fixtures all pointed at *missing* files, where both validators agree and no difference
+can show. The same shapes pointing at files that exist are exactly what separates them, and are now
+fixtures.
+

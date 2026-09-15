@@ -247,3 +247,29 @@ practice, a no-op.
 
 **Sizing.** Unknown until the intent is decided — a tier boost in the ORDER BY is small; deciding
 what the tier should *mean* against a 1.6M-row imported corpus is not.
+
+---
+
+## Stored scores go stale, and nothing refreshes them
+
+**Status:** open. The repair tool works again (D22); the policy question does not have an answer.
+
+The nightly seeder inserts and never updates — `INSERT INTO skills ... ON CONFLICT (owner, name) DO
+NOTHING` — so a skill edited upstream keeps the score it was given the day it was first seen. The
+only thing that re-scores an existing row is `scripts/rescore.ts`, run by hand.
+
+Two things follow, neither decided:
+
+**Should the seeder re-score a row whose content changed?** It already knows: `markSeen` records the
+blob SHA per source URL, so a changed SKILL.md is detectable without a second fetch. The cost is that
+every such row then writes, and a write rewrites both FTS5 tables for that row. Bounded for the 17
+watched repos; not obviously bounded once the nightly corpus sync is doing the same.
+
+**The imported corpus has no re-score path at all.** 1,610,459 rows scored at import time, and D22
+deliberately keeps `rescore.ts` off them: a GitHub round trip each is about 5.6 days at its pacing.
+The mechanism that can re-score them is a corpus rebuild and swap, which is also what would be needed
+to move them onto the D23 validator semantics. Both are the same operation, so they should be done
+once, together, not twice.
+
+**How stale is it?** Unmeasured. Sampling stored scores against a re-score of the current upstream
+files would size it, and that measurement has never been run.

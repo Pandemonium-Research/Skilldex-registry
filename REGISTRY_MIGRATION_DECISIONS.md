@@ -665,6 +665,148 @@ still a rollback. 004 took 5 seconds.
 
 ---
 
+## D22 — `rescore.ts` writes to Turso, and covers curated rows only
+
+Decided 2026-09-15.
+
+`rescore.ts` is the only way to re-score a row already in the registry, and since the 2026-09-06
+cutover (§13 in [REGISTRY_MIGRATION_FINDINGS.md](REGISTRY_MIGRATION_FINDINGS.md)) it had been writing
+to Supabase. The registry has served from Turso since that date, so every run updated a database
+nothing reads: the tool that exists to repair score drift was itself the reason the drift could not
+be repaired. Ported to `getDb()`.
+
+**Scope is curated rows** — `source <> 'imported'` — with `--include-imported` as a deliberate
+opt-in. Imported rows are 1,610,459 of 1,615,322, each already scored at import time by
+`scripts/corpus/build.ts`. Re-scoring one costs a GitHub round trip, and at the script's own 300ms
+pacing the corpus would take about 5.6 days; worse, every UPDATE fires `skills_au` and rewrites both
+FTS5 tables for that row, which is what the note at the foot of `schema/sqlite/002_source_and_stats.sql`
+warns against. The repair path for imported rows is a rebuild and swap, not this script.
+
+**A resume bug fixed with it.** The loader ordered by `(owner, name)` while the checkpoint stored the
+name alone. Names are unique only within an owner, and 41.5% of bare names collide, so on resume
+every later owner's skills sorting before the checkpoint name were filtered out as already-done and
+silently skipped. The checkpoint now carries `(name, owner)`, and the query orders and pages by that
+pair — keyset, not OFFSET, since `--include-imported` walks a 1.6M-row table. A checkpoint file
+without the owner half is ignored rather than trusted.
+
+**Not fixed here.** The nightly seeder still never re-scores an existing row — `INSERT ... ON CONFLICT
+(owner, name) DO NOTHING` — so an edited skill keeps its first score until someone runs this script.
+Whether the seeder should re-score when `blob_sha` changes is open; see [BACKLOG.md](BACKLOG.md).
+
+**Untested.** The script self-executes on import, so the checkpoint comparison has no unit test. It
+would need the run guarded behind an entry-point check first.
+
+**What would reverse it.** Nothing about the target. The curated-only default moves if the corpus
+ever gains a re-score path that does not go through GitHub.
+
+---
+
+## D23 — The two validators converge on one set of semantics, pinned by the conformance corpus
+
+Decided 2026-09-15.
+
+`src/validator/index.ts` says of itself that it "mirrors skilldex's src/core/validator.ts as of
+skillpm v1.1.2". The CLI is at 1.5.0, and the two had drifted in four places. A skill's score
+therefore depended on which surface scored it — the registry's stored number, or what the author saw
+from `skillpm validate`.
+
+Each difference is settled on its merits rather than by declaring one side canonical. Two went the
+registry's way, two the CLI's:
+
+| Check | Was | Now | Which side moved |
+|---|---|---|---|
+| Referenced files (7) | Registry kept `#anchor`, `"title"` and ` --flag` in the path and looked only inside `scripts/`, `references/`, `assets/`. skilldex reported any link target as a file, so `[image](raw_image)` was a broken reference | One `normaliseReference` in both: strip the anchor, the title and anything after whitespace; ignore URLs, other schemes and bare anchors; treat a target with neither a directory part nor an extension as not a reference; `../` leaves the skill and is reported missing | Both |
+| Allowed subdirs (4) | skilldex counted `.git` and `.github` as unknown subdirectories | Dot-directories are not part of the skill | skilldex |
+| Bundled files (2) | skilldex looked only at the top level of a bundled folder | Every depth, as the registry always did | skilldex |
+| Extension case | Registry compared case-sensitively, so `references/Setup.PY` passed | Lowercased before comparison | Registry |
+| Frontmatter fence | Registry required `---` exactly and scored `--- ` as 0 | A trailing space is a legal marker | Registry |
+
+**Scores move.** A skill with an anchored, titled or command-shaped reference gains up to 7. A skill
+referencing a file outside its own folder loses 7 where the registry had not been looking. A skill
+whose fence carries a trailing space goes from 0 to whatever it deserves. A skill at a repository
+root gains up to 4 from `skillpm validate`, and one hiding a script deeper in `references/`, or
+spelling its extension in capitals, loses 2.
+
+**Stored scores do not move with it.** Nothing re-scores on deploy: imported rows keep the numbers
+`build.ts` gave them, and curated rows keep theirs until `rescore.ts` runs (D22). Until then the
+registry serves scores computed under the old semantics — which is a smaller gap than it sounds,
+since the corpus was never scored by the CLI at all, but it does mean the fix and the data land at
+different times.
+
+**What kept them apart is now covered.** The shared conformance corpus
+(`tests/conformance-corpus/manifest.json`, generated from skilldex's fixtures) had anchored, titled
+and inline-code cases, but every one pointed at a *missing* file — where both validators agreed, so
+the divergence was invisible. Ten fixtures now cover those shapes pointing at files that exist, plus
+the dot-directory, nested and uppercase-extension cases and the trailing-space fence. Reverted
+against this file, four of them fail here.
+
+**The structural fix followed immediately** — see D24. The convergence had to land first: extracting
+a shared module while the two copies disagreed would have meant choosing a winner for each of these
+five rows inside a large file move, unreviewably. With them agreed and the corpus pinning them, the
+extraction moved no score at all.
+
+**What would reverse it.** A published rubric change. The corpus is regenerated from skilldex and
+re-vendored here, and both suites move together.
+
+---
+
+## D24 — The rubric leaves both repositories for `@skilldex/validator`
+
+Decided 2026-09-15, immediately after D23.
+
+`src/validator/index.ts` carried this note from the day it was written: *"Extract to
+@skilldex/validator package when drift becomes a real problem (i.e. you have fixed the same bug
+twice)."* The same bug has now been fixed twice — the inverted count-down loop (2026-07-09 to
+2026-09-04) and the five differences in D23 — so the condition it named is met.
+
+**What moved.** The eleven scored checks, the weights, the breakdown and the reference, structure and
+frontmatter rules are now `@skilldex/validator`, a pure function over `{ skillMd, files }`. Pure
+because that is the only shape both callers can supply: this registry scores rows whose files it
+knows only as a stored list and has no filesystem to walk.
+
+**What stayed.** This file is now an adapter, and owns exactly one rule — how a diagnostic is shaped
+on the wire. The rubric reports a `pass` for every check that succeeds, which is what
+`skillpm validate` prints; the API has only ever carried what is wrong, so passes are dropped here
+rather than in the rubric, where the CLI needs them. skilldex keeps the other adapter: find the
+folder, read SKILL.md, list the files.
+
+**It changed no score.** The conformance manifest regenerated byte-identical, and all 41 corpus cases
+pass on this side. Three of this repository's own unit tests did change, and all three were asserting
+the old copy's wording or severity rather than its arithmetic: two matched message text that the
+shared rubric phrases differently, and one expected a short description to be reported as an `error`.
+It is a `warning` now, as `skillpm validate` has reported it since 1.5.0 — the specification sets no
+word minimum. The score is unchanged either way, since points are awarded on pass, and `publish` does
+not gate on level, so nothing that was accepted is now rejected or the reverse.
+
+**Deployment order, which is not optional.** This repository's Vercel build installs from npm, so it
+cannot deploy until `@skilldex/validator` is published. Publish, then `npm install` here, then merge,
+then deploy.
+
+**The skillset rubric went with it, and it was not as clean as it looked.** `skillset.ts` was
+assumed to be drift-free because the conformance corpus pins it. Reading the two side by side to
+extract them found two differences the corpus could not see, both the same ones the skill validator
+had: this copy required the frontmatter fence to be exactly `---`, where a trailing space is a legal
+document marker, and it reported a short description as an `error` where `skillpm validate` reports a
+`warning`. The corpus missed them because no fixture opens with `--- ` and severity does not move a
+score. Settled the same way as on the skill side.
+
+**Coherence moved too, and cost nothing.** `skillset-coherence.ts` was a 702-line port carrying a
+header about having been "diffed function-by-function and run against every real skillset to confirm
+identical output". It had already abstracted its I/O behind `CoherenceSource`, so the checks never
+knew whether bytes came from a working tree or a fetched blob — which is exactly why it could become
+the shared implementation unchanged. The 31 lines left here re-export it;
+`src/routes/skillsets-publish.ts` still supplies the GitHub-backed source, so the trust-boundary
+argument for computing coherence server-side is untouched.
+
+**What the move cost in total.** Roughly 2,800 lines of rules held in two copies became 1,711 lines
+in one, plus about 455 lines of adapters across both repositories. In this one: 368 → 61 for skills,
+201 → 70 for skillsets, 702 → 31 for coherence.
+
+**What would reverse it.** Nothing foreseeable. The failure mode it removes is the one that has
+already happened twice.
+
+---
+
 ## What this migration loses
 
 Recorded honestly, so none of it is discovered later as a surprise.
