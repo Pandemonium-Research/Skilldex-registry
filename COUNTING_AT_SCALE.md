@@ -351,10 +351,17 @@ Not papers, but the canonical engineering references.
    why — the DESC/ASC tiebreak mismatch, or something else?
 2. Is the 6.4s FTS search rank-dominated or count-dominated? Run it with and without the window
    function. This determines whether §4 helps search at all, or only the listing.
+   *Answered 2026-09-17: rank-dominated. With the count bounded, what remained was bm25 scoring every
+   match before the LIMIT (REGISTRY_MIGRATION_FINDINGS.md §16).*
 3. Does FTS5 have *any* early-termination path for `ORDER BY bm25(...)`? §2.3 assumes not.
    Confirm from the FTS5 source, not from inference.
+   *Answered 2026-09-17: yes. FTS5 orders by its own `rank` column under a LIMIT inside the virtual
+   table, so ranking in the subquery — `ORDER BY rank LIMIT ? OFFSET ?` — returns the same page while
+   reading ~1K rows instead of up to 879,555. A rowid tiebreak inside the subquery disables that path
+   (REGISTRY_MIGRATION_DECISIONS.md D26).*
 4. What is the actual distribution of result-set sizes across real queries? If 99.9% are under
    10,001, the cap is invisible in practice and the whole question is academic.
+   *Since D27 the cap is 1,000, so more queries now report "1,000+". How many is unmeasured.*
 5. Does the 10,001 cap want to be configurable per-request, the way `track_total_hits` is?
 
 ---

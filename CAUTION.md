@@ -19,6 +19,10 @@ to v2 that it never received.
 **004 (`skillset_coherence`) was applied to v2 on 2026-09-07 and has never been applied to
 the rollback database.**
 
+**005 (`query_and_write_costs`) exists and is applied to neither.** For a corpus-sized database it is
+applied to a locally prepared file, which is then uploaded (§5). The rollback database holds 4,863
+rows, so applying 005 to it in place is cheap.
+
 **Since 2026-09-09 v2 also holds data the rollback lacks** — the three official skillsets, with
 coherence 4/4, 3/3 and 2/2. A rollback loses them as well as breaking the paths below.
 
@@ -87,6 +91,10 @@ stays correct as migrations accumulate without anyone remembering to update this
 The cheapest fix is to stop the divergence: **apply new migrations to both databases** while
 the rollback is still a rollback. That costs seconds for a schema-only migration like 004 and
 removes this whole section as a concern.
+
+**The exception is a migration that indexes or rewrites the 1.6M-row `skills` table**, 005 included.
+Turso bills a read for every existing row a `CREATE INDEX` scans, so on v2 such a migration is built
+into a local file and uploaded, never run in place (§5).
 
 ---
 

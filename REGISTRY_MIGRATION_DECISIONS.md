@@ -16,6 +16,10 @@ must not be deleted. Verification in
 row reads, and every database-backed endpoint failed. Cause and measured costs in
 [REGISTRY_MIGRATION_FINDINGS.md](REGISTRY_MIGRATION_FINDINGS.md) §16; fixes D25–D29.
 
+**Status, 2026-09-17: fixed on a branch, not deployed.** D25–D29 are on `fix/quota-query-costs`,
+verified against a local copy of the corpus. The plan is to move the database to a temporary Turso
+account until the 2026-10-01 reset (REGISTRY_MIGRATION_BACKLOG.md Phase 10).
+
 ---
 
 ## D1 — Move to Turso (SQLite), not a managed Postgres

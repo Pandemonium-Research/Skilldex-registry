@@ -94,7 +94,7 @@ Supabase tier plus whatever ranking makes the extra rows tolerable.
 
 ## Semantic search (embeddings + pgvector)
 
-**Status:** deferred. Search is keyword (Postgres FTS + `pg_trgm`).
+**Status:** deferred. Search is keyword (Postgres FTS + `pg_trgm`). *Since the Turso move it is SQLite FTS5, ranked by bm25 inside FTS5, and there is no trigram index (REGISTRY_MIGRATION_DECISIONS.md D26, D28).*
 
 **Goal:** Match queries against descriptions semantically, so `spreadsheet` finds a
 skill named `xlsx` described as "read and write Excel workbooks".

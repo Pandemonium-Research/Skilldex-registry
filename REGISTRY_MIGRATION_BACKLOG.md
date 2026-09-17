@@ -274,7 +274,7 @@ D15–D17; measurements in FINDINGS §5–§8; background in
 - [ ] **Sitemap.** A per-skill sitemap would have to page the API, and every request past
       offset 10,000 is now refused by the cap this same work introduced (1,000 since D27). It needs a bulk-export
       endpoint first. A static `sitemap.ts`/`robots.ts` is cheap and still absent
-- [ ] **`skills_trgm`** is built, integrity-checked, and still queried by nothing
+- [x] ~~**`skills_trgm`** is built, integrity-checked, and still queried by nothing~~ *Dropped in migration 005 (D28).*
 - [ ] `src/app/registry/skillsets/page.tsx` is a stale fork of the browse page. It inherits the
       count fix for free; its UI was not redesigned
 
@@ -441,9 +441,17 @@ Decisions D25–D29.
 - [x] `/v1/stats` and `/v1/tags` answer a failing database with an uncached 503, not cached zeros;
       `BLOCKED` on any route is a 503
 - [x] Skilldex-web `robots.txt` keeps crawlers off `/registry?…` filter URLs
+- [ ] Merge `fix/quota-query-costs` (registry) and `fix/registry-crawl-and-cap` (Skilldex-web), and deploy the
+      registry, **before** any database move — otherwise a fresh quota burns the same way
 - [ ] Apply 005 by building locally and uploading (`--from-file`) — never on the hosted database
+- [ ] Move `skilldex-registry-v2` to a temporary Turso account until the 2026-10-01 reset (planned 2026-09-17;
+      details to settle). Export with `turso db export` — untested while the account is blocked; the fallback,
+      a locally prepared corpus, lacks everything written after the 2026-09-06 cutover. Then apply 005 and
+      `VACUUM` locally, `turso db create --from-file`, and swap `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`
+      together in Vercel. Reverse on or after Oct 1 the same way: files, never row copies
 - [ ] Daily usage alarm: `GET /v1/organizations/{org}/usage` with a platform token, alert at 50% / 80%
       of the month-to-date budget
+- [ ] `q` combined with `tier=community` still ranks every match before filtering (104,755 rows for `q=python`)
 - [ ] Longer edge TTL for listings via `Vercel-CDN-Cache-Control`, with cache tags purged on publish
 - [x] `q` within the curated tier (a tag, or `source=seeded`/`published`) starts from the curated index:
       up to 1,159,590 rows read → ~10K–20K (D26)
