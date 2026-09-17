@@ -288,7 +288,7 @@ Header carries the headline from `/v1/stats`: **`4,863 curated · 1,615,322 inde
 **With a query or filter** → result list plus load-more, and a scope toggle
 (`Curated · All skills`) that switches `scope`.
 
-Render `total_relation: "gte"` as **`10,000+`**, never a bare `10001`.
+Render `total_relation: "gte"` as **`10,000+`**, never a bare `10001`. *(Since D27 the cap is 1,000 — render `1,000+`.)*
 
 ### B4. Load-more — `src/app/api/registry/skills/route.ts` (new)
 
@@ -435,7 +435,7 @@ since a rebuild is expensive.
   `sitemap.ts`/`robots.ts` for the ~10 real pages plus docs is cheap and worth doing; neither
   exists today. Prefer `robots: { index: false }` on `score === 0` and disambiguation pages
   over mass thin content.
-- **`skills_trgm`.** Built, integrity-checked, and never queried by any API code. Exposing
+- **`skills_trgm`.** *(Dropped in migration 005, D28.)* Built, integrity-checked, and never queried by any API code. Exposing
   typo-tolerant search is a real opportunity and a separate change.
 - **Skillsets tab.** `src/app/registry/skillsets/page.tsx` is a stale fork of the browse page.
   It inherits A2's count fix for free; its UI is not redesigned here.

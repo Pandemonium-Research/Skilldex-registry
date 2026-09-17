@@ -4,6 +4,9 @@ import { CACHE_STATS } from "../middleware/cache.js";
 
 export const statsRoutes = new Hono();
 
+/** A missing table means an unmigrated database. Anything else is the database failing. */
+const isMissingTable = (err: unknown) => /no such table/i.test((err as Error)?.message ?? "");
+
 /**
  * GET /v1/stats — headline counts for the registry.
  *
@@ -19,7 +22,18 @@ statsRoutes.get("/", async (c) => {
   let stats;
   try {
     stats = await readStats();
-  } catch {
+  } catch (err) {
+    if (!isMissingTable(err)) {
+      // Never answer a database failure with zeros. A 200 is cached at the edge (CACHE_STATS), so
+      // when Turso blocked the account on 2026-09-15 the site showed "0 skills" for as long as the
+      // outage lasted, indistinguishable from an empty registry. 503 with no-store is neither
+      // cached nor mistaken for data (FINDINGS §16).
+      c.header("Cache-Control", "no-store");
+      return c.json(
+        { error: "Registry statistics are temporarily unavailable", code: "DB_UNAVAILABLE" },
+        503
+      );
+    }
     // registry_stats missing — migration 002 has not been applied to this database.
     stats = { values: {}, updated_at: null };
   }
@@ -52,7 +66,12 @@ tagsRoutes.get("/", async (c) => {
     const tags = await readTagCounts();
     c.header("Cache-Control", CACHE_STATS);
     return c.json({ tags });
-  } catch {
+  } catch (err) {
+    if (!isMissingTable(err)) {
+      // Same reasoning as /v1/stats: an empty list is data, and a failure must not look like it.
+      c.header("Cache-Control", "no-store");
+      return c.json({ error: "Tags are temporarily unavailable", code: "DB_UNAVAILABLE" }, 503);
+    }
     return c.json({ tags: [] });
   }
 });

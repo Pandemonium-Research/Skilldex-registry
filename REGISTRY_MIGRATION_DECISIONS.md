@@ -12,6 +12,19 @@ rebuilt from the dataset DOI at any time.
 must not be deleted. Verification in
 [REGISTRY_MIGRATION_FINDINGS.md](REGISTRY_MIGRATION_FINDINGS.md) §13.
 
+**Status, 2026-09-15: blocked.** Turso blocked the account for exceeding the Free plan's 500M monthly
+row reads, and every database-backed endpoint failed. Cause and measured costs in
+[REGISTRY_MIGRATION_FINDINGS.md](REGISTRY_MIGRATION_FINDINGS.md) §16; fixes D25–D29.
+
+**Status, 2026-09-17: fixed on a branch, not deployed.** D25–D29 are on `fix/quota-query-costs`,
+verified against a local copy of the corpus. The plan is to move the database to a temporary Turso
+account until the 2026-10-01 reset (REGISTRY_MIGRATION_BACKLOG.md Phase 10).
+
+**Status, 2026-09-17, later: moving to a temporary account (D30).** Export from the blocked account is
+itself blocked, so the temporary database is built from the 2026-09-06 corpus file and loses what
+production wrote between the cutover and the block. D26 gained a sixth fix (search with a broad
+filter).
+
 ---
 
 ## D1 — Move to Turso (SQLite), not a managed Postgres
@@ -232,6 +245,17 @@ roughly 50 MB at 1.61M rows.
 
 **Why not just drop it.** Losing fuzzy name matching silently would be a user-visible
 regression in the thing the registry exists to do.
+
+> **Superseded 2026-09-17 by D28 — `skills_trgm` is dropped in migration 005.** The regression this
+> guarded against could not happen, because fuzzy name matching was never served on either stack. On
+> Supabase, `skills_name_trgm_idx` (`gin_trgm_ops`) existed in the schema but no query used it: search
+> was `textSearch("name, description", q)`, which is full-text, and no commit in `src/` or `api/` ever
+> used `ilike`, `similarity()` or a trigram operator. On Turso, no commit ever queried `skills_trgm`;
+> it was only built, rebuilt and integrity-checked by scripts, and the migration's API parity check
+> compared full-text queries only. No client — CLI, site or MCP server — offers substring or
+> typo-tolerant search. What the table did cost was real: 115 MB, not the ~50 MB estimated above, and
+> a row on every insert, update and delete. Building typo-tolerant name search is a new feature that
+> starts by recreating this table (D28).
 
 ---
 
@@ -804,6 +828,211 @@ in one, plus about 455 lines of adapters across both repositories. In this one: 
 
 **What would reverse it.** Nothing foreseeable. The failure mode it removes is the one that has
 already happened twice.
+
+---
+
+## D25 — Nothing runs against production except production traffic
+
+Decided 2026-09-17.
+
+Between 2026-09-06 and 09-13 the registry read ~500M rows and the account was blocked (FINDINGS §16).
+The heaviest days were working days: acceptance testing on v2 while the listing still read 6.46M rows
+per request, CLI development, and experiments issuing hundreds of cold searches. The query shapes made
+each request expensive; running development against production turned that into a bill.
+
+**Decision.** Tests, fixes, measurements, experiments and one-off scripts run against a local copy of
+the corpus, served by `sqld` on loopback, with the API pointed at it explicitly. npm scripts that load
+`.env` are for real administration only, because `.env` holds the production credentials. Experiments
+that fan out queries — E4a, E4b — point the CLI at a local registry through `SKILLDEX_REGISTRY_URL`.
+The recipe is in LOCAL_REGISTRY.md.
+
+**Why `sqld`, not a `file:` URL.** The API uses `@libsql/client/web`, which speaks HTTP only. And `sqld`
+reports rows read and written per statement with the accounting Turso bills, so a change's cost is
+measured before it ships — every number in D26–D29 came from it.
+
+**What it does not cover.** Latency: a local run has no network hop and no contention, so E4c's latency
+figures stay production-only. And data written to production after the cutover, which the local copy
+lacks.
+
+**What would reverse it.** A plan so large that a test run is noise. Even then, measuring cost locally
+is worth keeping.
+
+---
+
+## D26 — A query shape is judged by the rows it scans, not how long it takes
+
+Decided 2026-09-17.
+
+At per-row pricing a query can be quick and ruinous. Five shapes each scanned between 48K and 3.2M
+rows per request (FINDINGS §16). Each fix below returns identical results. That was checked against
+the SQL it replaced: on fixtures in tests/unit/query-costs.test.ts, and through the real API across 36
+request shapes on the full corpus.
+
+1. **Tag filter.** `EXISTS (… json_each(s.tags) …)` walked the table: 3,229,704 rows. Only curated rows
+   carry tags — `build.ts` inserts every imported row with `tags` NULL, and `refreshTagCounts` already
+   relies on that — so the filter now adds `s.source <> 'imported'`, and the curated partial indexes
+   serve it (D19's conjunct). Two sorts have no curated index in their order, `score` and `name`. For
+   those the ordering is written `+s.score` / `+s.name`: the unary plus keeps the full-table indexes out
+   of the plan, so SQLite reads the curated index and sorts at most ~4,863 rows. 8,786–14,086 rows
+   read now.
+   ⚠ This encodes an invariant. An importer that writes tags on imported rows would have them
+   silently excluded from tag filters.
+2. **`tier=community`.** 99.7% of the table, so `skills_trust_tier_idx` was the worst access path
+   available: fetch every community row, then sort. `+s.trust_tier = ?` walks the sort index instead
+   and stops at the page — 3,240,634 → 1,024. `verified` keeps the index.
+3. **`spec_version`.** Nothing indexed it, so a version matching nothing scanned the table twice
+   (3,230,646). Migration 005 adds `skills_spec_version_other_idx`, a partial index holding only the
+   rows off 1.0, and any other version carries the predicate as a conjunct: 4–5 rows. Rejected:
+   validating against `spec_versions`, which lists only 1.0 while one skill is on 2.1 and would be
+   hidden; a full index, which is 1.6M entries to find a handful.
+4. **Relevance search.** Scoring every match and sorting outside FTS5 read up to 879,555 rows. With no
+   other predicate the subquery now orders by FTS5's own `rank` (bm25 with default weights, the same
+   function) under the LIMIT, so only the page is joined: 1,064. Rejected: a rowid tiebreak inside the
+   subquery, which takes FTS5 off that path (589,744); capping how many matches get ranked, which
+   changes results.
+5. **Search within the curated tier.** A search with a tag, or with `source=seeded`/`published`,
+   started from every FTS5 match and joined each to `skills` before the curated filter threw
+   nearly all of them away: `q=skill&tags=terminal` read 1,159,590 rows. It now starts from the
+   curated partial index, with `CROSS JOIN` pinning the order, and probes FTS5 by rowid for each row
+   — 14,094, identical pages and totals across 22 shapes. Its cost is bounded by the size of the
+   curated tier (~4,863 rows) rather than by how much the term matches, so a term that matches
+   nothing now reads ~12K rows instead of a handful: accepted, as a fixed ceiling beats a cost that
+   grows with the term.
+6. **Search with a broad filter.** `tier=community` keeps all but 7 rows and `source=imported` 99.7%,
+   so filtering after ranking discarded almost nothing, and the whole cost was ranking every match:
+   `q=skill&tier=community` read 871,547 rows. Such a search now ranks a window inside FTS5 — twice
+   the rows the page needs — filters it, and falls back to ranking every match only if the window
+   comes up short. It cannot come back wrong, only short: FTS5 yields the window in the full
+   ranking's (rank, rowid) order, so the window's surviving rows are a prefix of all surviving rows.
+   A page of limit + 1 rows is therefore right, and so is a shorter one when the exact count says
+   nothing follows it. A capped count cannot say that, so a short page under one reruns. On the
+   corpus a curated row almost never ranks that high (at most 14 in the top 2,002 across 30 terms), so
+   the fallback is a safety net: ~2K rows read, most of it the capped count, with identical pages and
+   counts in 249 of 249 SQL comparisons (48 forced to fall back) and 49 of 49 API responses. Rejected:
+   sizing the window from `skills_verified`/`skills_curated`, which is exact without a fallback but
+   ties the query to the stats table. A filter that narrows — `tier=verified`, `owner`, `min_score`,
+   `spec_version` — and any explicit sort still rank every match (BACKLOG.md).
+7. **How it stays fixed.** The tests assert query plans, not timings. With no `sqlite_stat1` — neither
+   the test database nor production has one — SQLite plans against the same default size estimates
+   whatever a table holds, so a fixture gets production's access path.
+
+**What would reverse it.** Running `ANALYZE` on production: plans could change, and the plan tests
+must be re-run with statistics present. A normalised tags table (D8) would retire fix 1. Fix 6 depends
+on its filters staying broad: if verified or curated rows came to dominate the top of the ranking,
+the window would fall back often, still correct but paying for the window and the full ranking.
+
+---
+
+## D27 — The count cap and the deepest offset drop from 10,000 to 1,000
+
+Decided 2026-09-17, by Pranav.
+
+The capped count is the floor on what any filtered listing or search reads: stopping at 10,001 reads
+10,001 rows. Once D26 fixed the shapes, that floor was most of what a typical request cost — a
+relevance search read ~10,062 rows at a 10,000 cap and 1,064 at 1,000.
+
+`MAX_OFFSET` must equal the cap (`src/db/pagination.ts`), so no listing or search pages past 1,000
+either. What changes for clients: a total above 1,000 reads `"total": 1000, "total_relation": "gte"`,
+rendered "1,000+"; `offset` above 1,000 is a 400. Skilldex-web takes `max_offset` from the response.
+skilldex-cli now reads `total_relation` and prints "Found 1,000+ skills", and its MCP search tool
+passes the relation through (not yet released).
+
+**What would reverse it.** A plan where 10K rows per request is noise, or a real need for deep paging —
+which is better met by cursors or an export than by a larger offset.
+
+---
+
+## D28 — FTS is rewritten only when indexed text changes, and `skills_trgm` goes (migration 005)
+
+Decided 2026-09-17.
+
+`skills_au` fired on every UPDATE, so an install or a rescore deleted and re-inserted the row in both
+FTS5 tables: 6–7 rows written for a one-column change. It is now `AFTER UPDATE OF name, description`,
+the two columns FTS indexes, and an install writes 2–3.
+
+`skills_trgm` was built for substring and typo-tolerant name matching (D11), and nothing ever queried
+it (Phase 9 already recorded it as unreachable). D11's reason for keeping it — that dropping it would
+silently lose fuzzy matching — does not hold: that matching was never served, on Supabase or on Turso
+(see the note on D11). It held 115 MB and added a row to every insert,
+update and delete, so it is dropped. Rebuilding it from `skills` is possible if that feature is built;
+measure its write cost first.
+
+005 also adds `skills_curated_name_idx`, which `rescore.ts`'s curated walk needed (4,747,852 → 14,863
+rows read), and the spec-version index from D26.
+
+**Applied to a file, never to the hosted database.** Applying 005 read 3,235,804 rows, the two
+`CREATE INDEX` scans, and freed 115 MB that only `VACUUM` returns. The corpus database is prepared
+locally and created with `turso db create --from-file` (CAUTION.md §5).
+
+**The corpus build had to learn trigger order.** `build.ts` deferred every `CREATE TRIGGER` until the
+rows were loaded. With 005 the triggers are a sequence — created in 001, dropped and re-created in
+005 — and replaying only the CREATEs fails on the second `skills_au`. `isTriggerDdl` defers `DROP
+TRIGGER` too and runs both in migration order; a test pins that the end state matches applying every
+statement in order.
+
+**What would reverse it.** Building typo-tolerant name search.
+
+---
+
+## D29 — `refreshStats` derives the imported count and recounts owners weekly
+
+Decided 2026-09-17.
+
+Two of the six headline figures were full scans, run by the seeder every night: `skills_imported`
+(1,615,322 rows) and `count(DISTINCT owner)` (1,615,322 rows).
+
+**Decision.** `skills_imported = skills_total - skills_curated`, which is exact because `source` is
+CHECK-constrained to three values. `owners_total` is recounted only when the stored value is older than
+seven days; scripts that build a local file pass `ownersMaxAgeMs: 0`. A refresh now reads 8,836 rows
+instead of 3,239,480. At a nightly cadence that is ~97M rows a month down to ~7M, nearly all of it the
+weekly owner count.
+
+A skipped owner count keeps its old `updated_at`, and `/v1/stats` reports the stalest key, so the
+response says honestly that one figure may be a week old.
+
+**What would reverse it.** An owner count people rely on day to day, or one maintained incrementally
+on publish and delete.
+
+---
+
+## D30 — Serve from a temporary Turso account until the reset, built from the 2026-09-06 file
+
+Decided 2026-09-17, by Pranav.
+
+The original account stays blocked until quotas reset on 2026-10-01. The plan was to export
+`skilldex-registry-v2` and upload it to a new account, but an export is a read, and it is refused:
+`turso db export` fails with "SQL read operations are forbidden".
+
+**Decision.** Serve from a new account's `skilldex-registry-v2`, in a group in `aws-us-east-1`, the
+region the original was in. It is created with `--from-file` from `build/registry.db`, the file the
+original was created from on 2026-09-06, brought to the current schema locally:
+`prepare-corpus-db.ts`, `migrate.ts` (004 and 005), then `VACUUM`. The result is 1,771,839,488 bytes,
+under the 2 GB `--from-file` limit; `quick_check` and both FTS integrity checks pass, and its row
+counts match the cutover pre-flight (FINDINGS §13, §17).
+
+**What it loses.** Everything production wrote between the cutover and the block, which the file never
+had:
+
+- the three official skillsets, published 2026-09-09 — republish them from Skilldex-skillset;
+- nine days of install counts;
+- publisher rows from GitHub sign-ins — those people sign in again;
+- any skill published, delisting recorded or repo added in that window. **Delistings matter most**: a
+  missing one puts back content someone asked to have removed. Confirm none was recorded before the
+  temporary database serves traffic.
+
+**Order.** Deploy the D26–D29 code first; creating the database costs no reads, but pointing the
+old query shapes at a fresh quota burns it the same way. Then swap `TURSO_DATABASE_URL` and
+`TURSO_AUTH_TOKEN` together in Vercel and redeploy.
+
+**Moving back is a merge, not a swap.** After the reset the original database holds the 2026-09-06 to
+09-15 writes and the temporary one holds everything written since the move; neither contains the
+other. Export both, merge the small tables locally — publishers, skillsets, published skills,
+delistings, and install counts as deltas over the 2026-09-06 file — upload the result with
+`--from-file`, and delete neither database until that is verified. The usage alarm and longer edge
+caching (BACKLOG.md) are applied after the move back.
+
+**What would reverse it.** Upgrading the original account instead. Turso's block message points at
+upgrading, and the Developer plan ($4.99 a month, 2.5B reads) would keep every row and need no move.
 
 ---
 

@@ -184,7 +184,7 @@ async function verify(turso: Client) {
   // can legitimately differ at the margin. Printed for a human to eyeball.
 
   console.log("\nFTS integrity");
-  for (const t of ["skills_fts", "skills_trgm", "skillsets_fts"]) {
+  for (const t of ["skills_fts", "skillsets_fts"]) {
     try {
       await turso.execute(`INSERT INTO ${t}(${t}) VALUES('integrity-check')`);
       console.log(`  ✓ ${t}`);

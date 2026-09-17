@@ -8,11 +8,19 @@
  *
  * Full rationale in COUNTING_AT_SCALE.md; the short version is that ranked retrieval can
  * terminate early and counting cannot, so an exact total forfeits every top-k optimisation.
- * Elasticsearch caps at 10,000 and reports `hits.total.relation`; this is the same contract.
+ * Elasticsearch caps at 10,000 and reports `hits.total.relation`; this is the same contract, with a
+ * lower cap (D27).
  */
 
-/** The cap the API ships with. Changing this changes the public contract. */
-export const DEFAULT_COUNT_CAP = 10_000;
+/**
+ * The cap the API ships with. Changing this changes the public contract.
+ *
+ * 1,000 since D27, down from 10,000. The capped count is the floor on what any filtered listing or
+ * search reads — a query matching 10,000+ rows read 10,001 of them just to say "10,000+" — and at
+ * Turso's per-row-read pricing that floor was the largest remaining cost once the query shapes were
+ * fixed. It also moves MAX_OFFSET, so no listing pages past 1,000.
+ */
+export const DEFAULT_COUNT_CAP = 1_000;
 
 /**
  * Deepest reachable offset.

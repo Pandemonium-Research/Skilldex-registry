@@ -19,6 +19,10 @@ to v2 that it never received.
 **004 (`skillset_coherence`) was applied to v2 on 2026-09-07 and has never been applied to
 the rollback database.**
 
+**005 (`query_and_write_costs`) exists and is applied to neither.** For a corpus-sized database it is
+applied to a locally prepared file, which is then uploaded (§5). The rollback database holds 4,863
+rows, so applying 005 to it in place is cheap.
+
 **Since 2026-09-09 v2 also holds data the rollback lacks** — the three official skillsets, with
 coherence 4/4, 3/3 and 2/2. A rollback loses them as well as breaking the paths below.
 
@@ -88,6 +92,10 @@ The cheapest fix is to stop the divergence: **apply new migrations to both datab
 the rollback is still a rollback. That costs seconds for a schema-only migration like 004 and
 removes this whole section as a concern.
 
+**The exception is a migration that indexes or rewrites the 1.6M-row `skills` table**, 005 included.
+Turso bills a read for every existing row a `CREATE INDEX` scans, so on v2 such a migration is built
+into a local file and uploaded, never run in place (§5).
+
 ---
 
 ## 4. Verify DDL by re-reading, never by the absence of an error
@@ -116,6 +124,32 @@ That is the verified state of v2 as of 2026-09-07.
 
 ## 5. Other standing cautions
 
+- **Nothing runs against production Turso except production traffic.** Tests, fixes, measurements,
+  experiments and one-off scripts run against a local copy of the corpus (D25). Several npm scripts
+  load `.env` — `dev`, `seed`, `rescore`, `migrate`, `add-repo`, `refresh-stats`, `delist`,
+  `parity:api` — and `.env` holds the production URL and token, so running one "locally" runs it
+  against production. The local recipe is in [LOCAL_REGISTRY.md](LOCAL_REGISTRY.md).
+- **The free plan blocks the whole account at any limit, not just the database that crossed it.**
+  On 2026-09-15 a read-quota overrun made every statement on every database in the org fail with
+  `BLOCKED`, and the registry went down (FINDINGS §16). Quotas reset on the 1st of the calendar
+  month, and the block landed about two days after the limit was actually crossed.
+- **While production runs on the temporary account (D30), two databases each hold writes the other
+  lacks.** The original account's `skilldex-registry-v2` has everything written from 2026-09-06 to
+  09-15; the temporary one, built from the 2026-09-06 file, has everything written since the move.
+  Moving back after the 2026-10-01 reset is a merge, not a key swap, and neither database is deleted
+  until the merged file is verified. The rollback database `skilldex-registry` sits on the original
+  account and is blocked with it, so until the reset there is no rollback target.
+- **Migration 005 is applied to a local file and uploaded, never run on the hosted database.** Its
+  two `CREATE INDEX` statements read every row of `skills` — 3,235,804 rows read when applied
+  locally — and dropping `skills_trgm` frees 115 MB that only a `VACUUM` gives back. Build the file
+  locally (`prepare-corpus-db.ts`, then `migrate.ts --url file:…`, then `VACUUM`) and create the
+  database from it (D28).
+- **Copy a corpus-sized database as a file, never row by row.** `turso db create --from-file` bills
+  no row writes. Replaying rows would: each skill insert writes 11 rows once the FTS triggers
+  fire, so 1.6M of them is ~17.8M rows written — well past the free plan's 10M a month.
+- **Every Vercel deploy starts with an empty CDN cache.** The cache key includes the deployment URL,
+  so after each deploy the first request for every distinct URL reaches the database. Batch
+  deploys; do not redeploy repeatedly to test something.
 - **Never purge the `delistings` table.** It is the only thing preventing the next corpus
   build from re-importing content someone asked to have removed. See
   [OPT_OUT.md](OPT_OUT.md).

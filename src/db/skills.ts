@@ -32,6 +32,22 @@ const SORT_MAP: Record<string, string> = {
 };
 
 /**
+ * Orderings for a predicate already confined to the curated tier (D26).
+ *
+ * `installs` and `recent` have curated partial indexes in exactly those orders, so they stay as they
+ * are. `score` and `name` do not, and left alone SQLite walks the full-table index in that order and
+ * filters — reading most of 1.6M rows to find ~4,863 curated ones (485,611 rows for a tag filter by
+ * score). The unary `+` makes the ordering an expression no index can satisfy, so the planner reads
+ * the curated partial index and sorts those few thousand rows instead. A column behind `+` keeps its
+ * collation, so the order itself does not change.
+ */
+const CURATED_SORT_MAP: Record<string, string> = {
+  ...SORT_MAP,
+  score: "+s.score DESC, s.seq ASC",
+  name: "+s.name ASC, s.seq ASC",
+};
+
+/**
  * Which ordering applies when the caller did not ask for one.
  *
  * A text search sorted by popularity is not a search — it answers "what is popular among
@@ -97,28 +113,16 @@ export async function searchSkills(params: SearchSkillsQuery): Promise<SearchSki
   const db = getDb();
   const where: string[] = [];
   const whereArgs: InArgs = [];
+  // True once the predicate excludes imported rows. That is what lets the curated partial indexes
+  // serve a query (D19), and it selects CURATED_SORT_MAP below.
+  let curatedOnly = false;
+  // True once any predicate excludes more than a sliver of the table. Only `source=imported` and
+  // `tier=community` leave it false: they keep 99.7% and all but 7 rows, which is what lets a search
+  // filter a ranked window instead of ranking every match (D26).
+  let narrowed = false;
 
-  // Full-text search over name + description.
-  //
-  // Two FROM clauses, because the page needs a rank and the count does not. bm25() is an FTS5
-  // auxiliary function evaluated per matched row, so dropping it from the count subquery
-  // avoids scoring the entire match set purely to count it.
-  //
-  // The rank stays inside an FTS-only subquery: `m` is then an ordinary relation the outer
-  // query can filter and order freely. This was originally needed because bm25() is rejected
-  // ("unable to use function bm25 in the requested context") alongside a window function.
-  // The window function is gone, but the subquery stays — the payoff from removing it is
-  // unmeasured and the failure mode is a 500 on every search.
   const fts = params.q ? toFtsQuery(params.q) : null;
   const ftsArgs: InArgs = fts ? [fts] : []; // bound first: FROM precedes every WHERE placeholder
-  const fromPage = fts
-    ? "skills s JOIN (SELECT rowid AS seq, bm25(skills_fts) AS rank" +
-      " FROM skills_fts WHERE skills_fts MATCH ?) m ON m.seq = s.seq"
-    : "skills s";
-  const fromCount = fts
-    ? "skills s JOIN (SELECT rowid AS seq" +
-      " FROM skills_fts WHERE skills_fts MATCH ?) m ON m.seq = s.seq"
-    : "skills s";
 
   // Provenance filter. Unset by default: the whole registry is searchable, which is the point
   // of having imported it.
@@ -134,33 +138,66 @@ export async function searchSkills(params: SearchSkillsQuery): Promise<SearchSki
       params.source === "imported" ? "s.source = ?" : "s.source <> 'imported' AND s.source = ?"
     );
     whereArgs.push(params.source);
+    curatedOnly = params.source !== "imported";
+    narrowed ||= curatedOnly;
   }
 
   if (params.tier) {
-    where.push("s.trust_tier = ?");
+    // `community` is 99.7% of the table, which makes skills_trust_tier_idx the worst access path
+    // there is for it: SQLite fetched every community row through the index and then sorted them
+    // all to return one page. The unary `+` keeps that index out of the plan, so the sort index is
+    // walked instead and the scan stops at limit + 1 — 3,240,632 rows read became 10,024, same
+    // page and count (D26). `verified` is 7 rows, where the index is exactly right.
+    where.push(params.tier === "community" ? "+s.trust_tier = ?" : "s.trust_tier = ?");
     whereArgs.push(params.tier);
+    narrowed ||= params.tier !== "community";
   }
 
   if (params.min_score !== undefined) {
     where.push("s.score >= ?");
     whereArgs.push(params.min_score);
+    narrowed = true;
   }
 
   if (params.spec_version) {
-    where.push("s.spec_version = ?");
+    // Nothing indexes spec_version across the table: all but a handful of rows are on 1.0, so a full
+    // index would be 1.6M entries to find a few. A version matching nothing therefore walked the
+    // whole table for the page and again for the count — 3,230,644 rows read (D26).
+    // skills_spec_version_other_idx (005) holds only the rows off 1.0, and SQLite uses a partial index
+    // only when the query repeats its predicate, so any other version carries it as a conjunct
+    // (D19). 1.0 itself needs no index: nearly every row matches, so the page and the capped count
+    // both stop almost at once.
+    where.push(
+      params.spec_version === "1.0"
+        ? "s.spec_version = ?"
+        : "s.spec_version <> '1.0' AND s.spec_version = ?"
+    );
     whereArgs.push(params.spec_version);
+    narrowed = true;
   }
 
   if (params.owner) {
     where.push("s.owner = ?");
     whereArgs.push(params.owner);
+    narrowed = true;
   }
 
   if (params.tags) {
     const tagList = params.tags.split(",").map((t) => t.trim()).filter(Boolean);
     if (tagList.length) {
+      // Only curated rows carry tags: build.ts inserts every imported row with tags NULL, and
+      // refreshTagCounts aggregates the curated tier alone for the same reason. Saying so in the
+      // predicate lets the curated partial indexes serve the filter instead of json_each walking
+      // all 1.6M rows — 3,229,702 rows read became 8,784 for sort=installs, same page and count
+      // (D26). Skipped when the provenance filter above already carries the conjunct.
+      if (!curatedOnly) {
+        where.push("s.source <> 'imported'");
+        curatedOnly = true;
+      }
+      narrowed = true;
       // Postgres used `tags && array[...]` over a GIN index. SQLite has no array type, so
-      // this walks the JSON. It is a scan; see D8 for why the normalised table is deferred.
+      // this walks the JSON — of curated rows only, now. See D8 for why the normalised table
+      // is deferred.
       where.push(
         `EXISTS (SELECT 1 FROM json_each(s.tags) WHERE value IN (${tagList
           .map(() => "?")
@@ -171,16 +208,115 @@ export async function searchSkills(params: SearchSkillsQuery): Promise<SearchSki
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const orderSql = SORT_MAP[resolveSort(params.sort, Boolean(fts))] ?? SORT_MAP.installs;
+  const sort = resolveSort(params.sort, Boolean(fts));
+  const orderSql = (curatedOnly ? CURATED_SORT_MAP : SORT_MAP)[sort] ?? SORT_MAP.installs;
 
+  // Full-text search over name + description.
+  //
+  // Two FROM clauses, because the page needs a rank and the count does not. bm25() is an FTS5
+  // auxiliary function evaluated per matched row, so dropping it from the count subquery
+  // avoids scoring the entire match set purely to count it.
+  //
+  // The rank stays inside an FTS-only subquery: `m` is then an ordinary relation the outer
+  // query can filter and order freely. This was originally needed because bm25() is rejected
+  // ("unable to use function bm25 in the requested context") alongside a window function.
+  // The window function is gone, but the subquery stays — the payoff from removing it is
+  // unmeasured and the failure mode is a 500 on every search.
+  const fromPage = fts
+    ? "skills s JOIN (SELECT rowid AS seq, bm25(skills_fts) AS rank" +
+      " FROM skills_fts WHERE skills_fts MATCH ?) m ON m.seq = s.seq"
+    : "skills s";
+  const fromCount = fts
+    ? "skills s JOIN (SELECT rowid AS seq" +
+      " FROM skills_fts WHERE skills_fts MATCH ?) m ON m.seq = s.seq"
+    : "skills s";
+
+  // A search ranked by relevance with nothing else narrowing it ranks *inside* FTS5 (D26).
+  //
+  // FTS5's `rank` column is bm25() with default weights — the same function fromPage calls — and
+  // FTS5 can order by it under a LIMIT within the virtual table, so only the page's rows leave FTS5
+  // and are joined. Scoring every match and sorting outside read 879,553 rows for `skill`; this
+  // reads the page plus the capped count. Pages were identical in 30 of 30 comparisons across
+  // queries, limits and offsets (FINDINGS §16).
+  //
+  // ⚠ Never add a rowid tiebreak inside the subquery: it takes FTS5 off that path (589,744 rows for
+  // `skill`). FTS5 already yields rank ties in rowid order; the outer ORDER BY re-sorts only the
+  // page, so its seq tiebreak costs nothing.
+  const rankInsideFts = Boolean(fts) && where.length === 0 && sort === "relevance";
+
+  // A search confined to the curated tier — by a tag, or by source=seeded/published — starts from
+  // the curated rows and asks FTS5 about each one, instead of starting from every match (D26).
+  //
+  // FTS-first, a broad term joins every match to `skills` before the curated filter discards almost
+  // all of them: `q=skill&tags=terminal` read 1,159,588 rows. CROSS JOIN pins the order — SQLite
+  // otherwise prefers the virtual table outermost — so the curated partial index is walked and
+  // FTS5 is probed by rowid for each row, which it seeks to directly in the doclist. The cost is
+  // bounded by the size of the curated tier (~14K rows at 4,863 curated skills) whatever the query
+  // matches; identical pages and counts in all 13 shapes compared on the corpus. A term rare enough
+  // to match a few hundred rows costs more this way than FTS-first, but only up to that bound.
+  const curatedFts = Boolean(fts) && curatedOnly;
+
+  const predicate = where.join(" AND ");
+  const curatedFrom = `skills s CROSS JOIN skills_fts ON skills_fts.rowid = s.seq
+          WHERE skills_fts MATCH ? AND ${predicate}`;
+
+  // A relevance search whose only filters are broad — `tier=community`, `source=imported` — ranks a
+  // window inside FTS5 and filters that, instead of ranking every match (D26).
+  //
+  // Those filters discard almost nothing, so the cost of the full form was all ranking:
+  // `q=skill&tier=community` scored and joined every match to read 871,547 rows for one page. The
+  // window is RANK_WINDOW_FACTOR times the rows the page needs, and on the corpus a curated row
+  // almost never ranks that high — at most 14 in the top 2,002 across 30 terms. The window reads
+  // ~2K rows, most of them the capped count. When it does fall short, windowFilledPage says so and
+  // the full ranking runs; identical pages and counts in 249 of 249 comparisons, 48 of them
+  // deliberately forced to fall back (FINDINGS §16).
+  const rankedWindow = Boolean(fts) && where.length > 0 && !narrowed && sort === "relevance";
+
+  // Every match ranked, joined and filtered before the page is cut. Right for any predicate, and the
+  // only form left for a narrowing one outside the curated tier, or an explicit sort.
+  //
   // limit + 1 so has_more is exact without a second query. Sliced immediately by takePage, so
   // no caller can observe the extra row.
-  const pageStmt = {
+  const rankAllStmt = {
     sql: `SELECT s.* FROM ${fromPage} ${whereSql}
           ORDER BY ${orderSql}
           LIMIT ? OFFSET ?`,
     args: [...ftsArgs, ...whereArgs, params.limit + 1, params.offset],
   };
+
+  const pageStmt = rankInsideFts
+    ? {
+        sql: `SELECT s.* FROM skills s JOIN (SELECT rowid AS seq, rank FROM skills_fts
+                WHERE skills_fts MATCH ? ORDER BY rank LIMIT ? OFFSET ?) m ON m.seq = s.seq
+              ORDER BY m.rank ASC, m.seq ASC`,
+        args: [fts as string, params.limit + 1, params.offset],
+      }
+    : curatedFts
+      ? {
+          // bm25() evaluated per surviving row: the same scores the subquery form computes.
+          sql: `SELECT s.* FROM ${curatedFrom}
+          ORDER BY ${sort === "relevance" ? "bm25(skills_fts) ASC, s.seq ASC" : orderSql}
+          LIMIT ? OFFSET ?`,
+          args: [fts as string, ...whereArgs, params.limit + 1, params.offset],
+        }
+      : rankedWindow
+        ? {
+            // CROSS JOIN keeps the window outermost, so skills is only probed by rowid for its rows.
+            sql: `SELECT s.* FROM (SELECT rowid AS seq, rank FROM skills_fts
+                    WHERE skills_fts MATCH ? ORDER BY rank LIMIT ?) m
+                  CROSS JOIN skills s ON s.seq = m.seq
+                  WHERE ${predicate}
+                  ORDER BY m.rank ASC, m.seq ASC
+                  LIMIT ? OFFSET ?`,
+            args: [
+              fts as string,
+              RANK_WINDOW_FACTOR * (params.offset + params.limit + 1),
+              ...whereArgs,
+              params.limit + 1,
+              params.offset,
+            ],
+          }
+        : rankAllStmt;
 
   // Derived from the predicate that was actually built, not by re-reading params. Testing
   // `params.tier || params.q || ...` drifts the first time someone adds a filter.
@@ -223,19 +359,47 @@ export async function searchSkills(params: SearchSkillsQuery): Promise<SearchSki
         sql: boundedCountSql("skills_fts", "WHERE skills_fts MATCH ?"),
         args: [fts as string, countLimitArg()],
       }
-    : {
-        sql: boundedCountSql(fromCount, whereSql),
-        args: [...ftsArgs, ...whereArgs, countLimitArg()],
-      };
+    : curatedFts
+      ? {
+          sql: `SELECT count(*) AS n FROM (SELECT 1 FROM ${curatedFrom} LIMIT ?)`,
+          args: [fts as string, ...whereArgs, countLimitArg()],
+        }
+      : {
+          sql: boundedCountSql(fromCount, whereSql),
+          args: [...ftsArgs, ...whereArgs, countLimitArg()],
+        };
 
   const [pageRes, countRes] = await db.batch([pageStmt, countStmt], "read");
+  const n = Number(countRes.rows[0].n);
 
-  const { page, has_more } = takePage(pageRes.rows, params.limit);
+  let rows = pageRes.rows;
+  if (rankedWindow && !windowFilledPage(rows.length, n, params.limit, params.offset)) {
+    rows = (await db.execute(rankAllStmt)).rows;
+  }
+
+  const { page, has_more } = takePage(rows, params.limit);
   return {
     skills: page.map(toSkillRow),
-    ...interpretCount(Number(countRes.rows[0].n)),
+    ...interpretCount(n),
     has_more,
   };
+}
+
+/** How many times the rows a page needs (offset + limit + 1) a ranked window holds. */
+const RANK_WINDOW_FACTOR = 2;
+
+/**
+ * Whether a ranked window returned the page that ranking every match would have.
+ *
+ * FTS5 yields the window in the same (rank, rowid) order as the full ranking, so the window's rows
+ * that pass the filter are a prefix of all the rows that do. Its page can therefore come back short,
+ * but never wrong. A full page — limit + 1 rows — is the right page. A short one is right only if
+ * nothing follows it, which an exact count can confirm and a capped count cannot.
+ */
+function windowFilledPage(got: number, n: number, limit: number, offset: number): boolean {
+  if (got > limit) return true;
+  const { total, total_relation } = interpretCount(n);
+  return total_relation === "eq" && got === Math.max(0, total - offset);
 }
 
 export async function getSkill(owner: string, name: string): Promise<SkillRow | null> {
