@@ -133,6 +133,12 @@ That is the verified state of v2 as of 2026-09-07.
   On 2026-09-15 a read-quota overrun made every statement on every database in the org fail with
   `BLOCKED`, and the registry went down (FINDINGS §16). Quotas reset on the 1st of the calendar
   month, and the block landed about two days after the limit was actually crossed.
+- **While production runs on the temporary account (D30), two databases each hold writes the other
+  lacks.** The original account's `skilldex-registry-v2` has everything written from 2026-09-06 to
+  09-15; the temporary one, built from the 2026-09-06 file, has everything written since the move.
+  Moving back after the 2026-10-01 reset is a merge, not a key swap, and neither database is deleted
+  until the merged file is verified. The rollback database `skilldex-registry` sits on the original
+  account and is blocked with it, so until the reset there is no rollback target.
 - **Migration 005 is applied to a local file and uploaded, never run on the hosted database.** Its
   two `CREATE INDEX` statements read every row of `skills` — 3,235,804 rows read when applied
   locally — and dropping `skills_trgm` frees 115 MB that only a `VACUUM` gives back. Build the file

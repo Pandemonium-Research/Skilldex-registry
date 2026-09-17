@@ -20,6 +20,11 @@ row reads, and every database-backed endpoint failed. Cause and measured costs i
 verified against a local copy of the corpus. The plan is to move the database to a temporary Turso
 account until the 2026-10-01 reset (REGISTRY_MIGRATION_BACKLOG.md Phase 10).
 
+**Status, 2026-09-17, later: moving to a temporary account (D30).** Export from the blocked account is
+itself blocked, so the temporary database is built from the 2026-09-06 corpus file and loses what
+production wrote between the cutover and the block. D26 gained a sixth fix (search with a broad
+filter).
+
 ---
 
 ## D1 — Move to Turso (SQLite), not a managed Postgres
@@ -892,14 +897,29 @@ request shapes on the full corpus.
    — 14,094, identical pages and totals across 22 shapes. Its cost is bounded by the size of the
    curated tier (~4,863 rows) rather than by how much the term matches, so a term that matches
    nothing now reads ~12K rows instead of a handful: accepted, as a fixed ceiling beats a cost that
-   grows with the term. A search combined with any filter outside the curated tier still ranks every
-   match (104,755 for `q=python&tier=community`).
-6. **How it stays fixed.** The tests assert query plans, not timings. With no `sqlite_stat1` — neither
+   grows with the term.
+6. **Search with a broad filter.** `tier=community` keeps all but 7 rows and `source=imported` 99.7%,
+   so filtering after ranking discarded almost nothing, and the whole cost was ranking every match:
+   `q=skill&tier=community` read 871,547 rows. Such a search now ranks a window inside FTS5 — twice
+   the rows the page needs — filters it, and falls back to ranking every match only if the window
+   comes up short. It cannot come back wrong, only short: FTS5 yields the window in the full
+   ranking's (rank, rowid) order, so the window's surviving rows are a prefix of all surviving rows.
+   A page of limit + 1 rows is therefore right, and so is a shorter one when the exact count says
+   nothing follows it. A capped count cannot say that, so a short page under one reruns. On the
+   corpus a curated row almost never ranks that high (at most 14 in the top 2,002 across 30 terms), so
+   the fallback is a safety net: ~2K rows read, most of it the capped count, with identical pages and
+   counts in 249 of 249 SQL comparisons (48 forced to fall back) and 49 of 49 API responses. Rejected:
+   sizing the window from `skills_verified`/`skills_curated`, which is exact without a fallback but
+   ties the query to the stats table. A filter that narrows — `tier=verified`, `owner`, `min_score`,
+   `spec_version` — and any explicit sort still rank every match (BACKLOG.md).
+7. **How it stays fixed.** The tests assert query plans, not timings. With no `sqlite_stat1` — neither
    the test database nor production has one — SQLite plans against the same default size estimates
    whatever a table holds, so a fixture gets production's access path.
 
 **What would reverse it.** Running `ANALYZE` on production: plans could change, and the plan tests
-must be re-run with statistics present. A normalised tags table (D8) would retire fix 1.
+must be re-run with statistics present. A normalised tags table (D8) would retire fix 1. Fix 6 depends
+on its filters staying broad: if verified or curated rows came to dominate the top of the ranking,
+the window would fall back often, still correct but paying for the window and the full ranking.
 
 ---
 
@@ -972,6 +992,47 @@ response says honestly that one figure may be a week old.
 
 **What would reverse it.** An owner count people rely on day to day, or one maintained incrementally
 on publish and delete.
+
+---
+
+## D30 — Serve from a temporary Turso account until the reset, built from the 2026-09-06 file
+
+Decided 2026-09-17, by Pranav.
+
+The original account stays blocked until quotas reset on 2026-10-01. The plan was to export
+`skilldex-registry-v2` and upload it to a new account, but an export is a read, and it is refused:
+`turso db export` fails with "SQL read operations are forbidden".
+
+**Decision.** Serve from a new account's `skilldex-registry-v2`, in a group in `aws-us-east-1`, the
+region the original was in. It is created with `--from-file` from `build/registry.db`, the file the
+original was created from on 2026-09-06, brought to the current schema locally:
+`prepare-corpus-db.ts`, `migrate.ts` (004 and 005), then `VACUUM`. The result is 1,771,839,488 bytes,
+under the 2 GB `--from-file` limit; `quick_check` and both FTS integrity checks pass, and its row
+counts match the cutover pre-flight (FINDINGS §13, §17).
+
+**What it loses.** Everything production wrote between the cutover and the block, which the file never
+had:
+
+- the three official skillsets, published 2026-09-09 — republish them from Skilldex-skillset;
+- nine days of install counts;
+- publisher rows from GitHub sign-ins — those people sign in again;
+- any skill published, delisting recorded or repo added in that window. **Delistings matter most**: a
+  missing one puts back content someone asked to have removed. Confirm none was recorded before the
+  temporary database serves traffic.
+
+**Order.** Deploy the D26–D29 code first; creating the database costs no reads, but pointing the
+old query shapes at a fresh quota burns it the same way. Then swap `TURSO_DATABASE_URL` and
+`TURSO_AUTH_TOKEN` together in Vercel and redeploy.
+
+**Moving back is a merge, not a swap.** After the reset the original database holds the 2026-09-06 to
+09-15 writes and the temporary one holds everything written since the move; neither contains the
+other. Export both, merge the small tables locally — publishers, skillsets, published skills,
+delistings, and install counts as deltas over the 2026-09-06 file — upload the result with
+`--from-file`, and delete neither database until that is verified. The usage alarm and longer edge
+caching (BACKLOG.md) are applied after the move back.
+
+**What would reverse it.** Upgrading the original account instead. Turso's block message points at
+upgrading, and the Developer plan ($4.99 a month, 2.5B reads) would keep every row and need no move.
 
 ---
 

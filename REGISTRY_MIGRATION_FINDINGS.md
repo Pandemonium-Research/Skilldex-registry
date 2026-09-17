@@ -1145,6 +1145,39 @@ rows read to 12,203.
 The count cap (D27) changes what some responses say. Totals that were exact below 10,000 —
 `source=seeded` 4,863, `owner=sickn33` 2,115, `q=react hooks` 4,261 — now read "1,000+".
 
+### Search with a broad filter — a ranked window (D26 item 6)
+
+`q` with `tier=community` or `source=imported` still ranked every match after the fixes above, because
+neither filter confines a search to the curated tier. Both keep almost every row — 7 skills are
+verified, 4,863 are curated — so ranking a window inside FTS5 and filtering it should give the same
+page, if curated or verified rows rarely rank high. Measured on the corpus, they do not:
+
+| Top N of the ranking, 30 terms | 21 | 42 | 101 | 202 | 1,001 | 2,002 |
+|---|---|---|---|---|---|---|
+| Most curated rows in it, any term | 1 | 1 | 2 | 3 | 10 | 14 |
+
+Verified rows appeared once in any top 2,002 (`pdf`). A window of twice the rows a page needs is
+therefore ample, with a fallback to the full ranking when it comes up short. Compared at the SQL level
+across 15 terms and the three filter combinations, with eight limit/offset pairs for four of the terms,
+plus a group filtered to the curated tier to force the fallback: **249 of 249 identical pages and counts, 48 fallbacks.**
+Through the real API, HEAD against the new code on the same local database:
+
+| Request | HEAD | New |
+|---|---|---|
+| `q=skill&tier=community` | 871,549 | 2,128 |
+| `q=test&tier=community` | 446,210 | 2,128 |
+| `q=code review&tier=community` | 195,733 | 2,128 |
+| `q=python&tier=community` | 104,755 | 2,128 |
+| `q=pdf&source=imported` | 66,496 | 2,128 |
+| `q=hono&tier=community` (784 matches) | 3,922 | 1,695 |
+| `q=python&tier=community&offset=1000` | 104,755 | 8,128 |
+| `q=hono&source=imported&offset=700` (window falls short, exact count confirms) | 3,920 | 3,920 |
+| **49 requests, including 10 shapes the change must not touch** | **6,306,567** | **624,946** |
+
+49 of 49 responses identical. What remains is dominated by shapes that still rank every match, all
+unchanged: `q=python` with `min_score=70` 104,703, `spec_version=1.0` 104,756, `sort=installs`
+104,755, `owner=anthropics` 68,622, `tier=verified` 68,519.
+
 ### Two more things the investigation turned up
 
 **A failure served as data.** `/v1/stats` caught every error and returned zeros under
@@ -1165,3 +1198,31 @@ Turso's documentation does not define the metric, and it did not cause the block
 keeps a full-database snapshot (1.8 GB) beside its WAL log — consistent with large writes on the
 hosted database producing whole-file snapshots, but not proof of it.
 
+
+---
+
+## 17. The temporary account, 2026-09-17
+
+**The blocked account cannot be exported.** `turso db export skilldex-registry-v2` fails with
+"Operation was blocked: SQL read operations are forbidden". An export counts as a read, so nothing
+written to production after the 2026-09-06 cutover can be recovered before the 2026-10-01 reset (D30).
+
+**The upload file is the 2026-09-06 artifact at the current schema.** `build/registry.db` is the file
+`skilldex-registry-v2` was created from. On an APFS clone of it: `prepare-corpus-db.ts` (adds
+`source`, relabels 4,863 seeded rows, creates `registry_stats`, `tag_counts` and `delistings`,
+records 001–003), `migrate.ts` (004 and 005), then `VACUUM` (21s). Checked on a second clone, so the
+upload file itself was never opened for writing:
+
+| Check | Result |
+|---|---|
+| Size | 1,771,839,488 bytes (1.89 GB before: `skills_trgm` dropped, freelist 0) |
+| Journal mode | `delete`, no `-wal` beside it |
+| Migrations | 001, 002, 003, 004, 005 |
+| 005 | `skills_trgm` absent; `skills_curated_name_idx`, `skills_spec_version_other_idx` present; `skills_au` fires on `UPDATE OF name, description` |
+| `skills` | 1,615,322 — 1,610,459 imported, 4,856 seeded community, 7 seeded verified |
+| Support tables | `watched_repos` 17, `seen_source_urls` 10,932, `publishers` 1, `spec_versions` 1, `skillsets` 0, `delistings` 0, `registry_stats` 6, `tag_counts` 11 |
+| Stats | `owners_total` 158,915, `skills_curated` 4,863 |
+| Integrity | `quick_check` ok; `skills_fts` and `skillsets_fts` integrity-check ok |
+
+Every count matches the cutover pre-flight (§13). The new account's group was created in
+`aws-us-east-1`, the original's region.

@@ -282,17 +282,31 @@ files would size it, and that measurement has never been run.
 §16, decisions D25–D29). The query shapes that burned the quota are fixed; these are the
 guardrails that would have caught it early, and the costs that remain.
 
-- **Usage alarm.** Nothing watched the quota: the limit was crossed around Sept 12–13 and nobody
-  knew until every endpoint returned 500 on the 15th. Turso's platform API reports month-to-date
-  usage per database (`GET /v1/organizations/{org}/usage`); a daily scheduled job alerting at 50%
-  and 80% of the month-to-date budget would have given two days' warning at least.
-- **Edge cache lifetime.** Listings and searches cache for 60s fresh plus 300s stale, so a query
-  repeated more than six minutes apart pays full price again, and every deploy empties the cache.
-  `Vercel-CDN-Cache-Control` could hold them for hours, but a publish could not then appear until
-  expiry. That needs cache tags (`Vercel-Cache-Tag`) purged on publish before it is safe.
+- **Usage alarm.** *Scheduled for after the move back to the original account, on or after 2026-10-01
+  (D30).* Nothing watched the quota: the limit was crossed around Sept 12–13 and nobody knew until
+  every endpoint returned 500 on the 15th. Turso's platform API reports month-to-date usage per
+  database (`GET /v1/organizations/{org}/usage`, no rows read). A daily GitHub Actions job alerting
+  at 50% and 80% of the monthly limit, and on any day above ~16M reads (500M ÷ 31), would on this
+  month's numbers have fired on Sept 9, Sept 11 and Sept 6 respectively. It needs a platform token,
+  which can create and delete databases, so it lives in GitHub secrets only, and it must point at
+  whichever account is serving.
+- **Edge cache lifetime.** *Scheduled for after the move back, on or after 2026-10-01 (D30).*
+  Listings and searches cache for 60s fresh plus 300s stale, so a query repeated more than six
+  minutes apart pays full price again, the cache is per region, and every deploy empties it.
+  `Vercel-CDN-Cache-Control` could hold them for hours, but neither a publish nor a delisting would
+  then show until expiry — a delisting is the one that matters. That needs responses tagged
+  (`Vercel-Cache-Tag`) and a purge, with retries, on publish, delist and the nightly seed. Worth less
+  since D26: the dearest listing now reads ~15K rows, not 3M. Measure what repeats before building it.
 - ~~**`q` with `tags`.**~~ Fixed 2026-09-17 (D26): a search within the curated tier starts from the
-  curated partial index and probes FTS5 per row — ~14K rows, from up to 1,159,590. Still open: `q`
-  with `tier=community` ranks every match first (104,755 rows for `q=python`).
+  curated partial index and probes FTS5 per row — ~14K rows, from up to 1,159,590.
+- ~~**`q` with `tier=community`.**~~ Fixed 2026-09-17 (D26 item 6): a search whose only filters are
+  `tier=community` or `source=imported` filters a window ranked inside FTS5 — ~2K rows, from up to
+  871,547 for `q=skill`.
+- **`q` with a narrowing filter or an explicit sort still ranks every match.** Measured for `q=python`:
+  `min_score=70` 104,703 rows, `spec_version=1.0` 104,756, `sort=installs` 104,755,
+  `owner=anthropics` 68,622, `tier=verified` 68,519 (FINDINGS §16). `tier=verified` is 7 rows, all
+  curated today (nothing enforces that), so it could take the curated-tier path; `owner` could start from the `(owner, name)` index
+  the same way. Neither shape is known to be common.
 - **Where 385M of the 500M reads went is still unknown.** About 115M is attributed (FINDINGS §16).
   Turso's top-queries list (`turso db inspect --queries`) from the account that holds the database
   would settle it; Vercel's request logs grouped by route for Sept 7–12 would too.

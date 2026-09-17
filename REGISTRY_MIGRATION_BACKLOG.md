@@ -443,16 +443,27 @@ Decisions D25–D29.
 - [x] Skilldex-web `robots.txt` keeps crawlers off `/registry?…` filter URLs
 - [ ] Merge `fix/quota-query-costs` (registry) and `fix/registry-crawl-and-cap` (Skilldex-web), and deploy the
       registry, **before** any database move — otherwise a fresh quota burns the same way
-- [ ] Apply 005 by building locally and uploading (`--from-file`) — never on the hosted database
-- [ ] Move `skilldex-registry-v2` to a temporary Turso account until the 2026-10-01 reset (planned 2026-09-17;
-      details to settle). Export with `turso db export` — untested while the account is blocked; the fallback,
-      a locally prepared corpus, lacks everything written after the 2026-09-06 cutover. Then apply 005 and
-      `VACUUM` locally, `turso db create --from-file`, and swap `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`
-      together in Vercel. Reverse on or after Oct 1 the same way: files, never row copies
-- [ ] Daily usage alarm: `GET /v1/organizations/{org}/usage` with a platform token, alert at 50% / 80%
-      of the month-to-date budget
-- [ ] `q` combined with `tier=community` still ranks every match before filtering (104,755 rows for `q=python`)
-- [ ] Longer edge TTL for listings via `Vercel-CDN-Cache-Control`, with cache tags purged on publish
+- [x] Apply 005 by building locally and uploading (`--from-file`) — never on the hosted database. *Built
+      2026-09-17: `build/temp-account/registry.db`, 1,771,839,488 bytes, verified (FINDINGS §17)*
+- [ ] Move to a temporary Turso account until the 2026-10-01 reset (D30). `turso db export` is refused while
+      the account is blocked, so the database comes from the 2026-09-06 file and loses the Sept 6–15 writes.
+  - [x] New account's group `default` in `aws-us-east-1`
+  - [ ] Confirm no delisting, publish or `add-repo` was recorded between 2026-09-06 and 09-15
+  - [ ] `turso db create skilldex-registry-v2 --from-file build/temp-account/registry.db --group default --wait`
+  - [ ] Deploy the registry and Skilldex-web fixes, then swap `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`
+        together in Vercel and redeploy
+  - [ ] Republish the three official skillsets from Skilldex-skillset
+- [ ] Move back on or after 2026-10-01 as a merge: export both databases, merge publishers, skillsets,
+      published skills, delistings and install-count deltas locally, upload with `--from-file` (D30).
+      Delete neither database until verified
+- [ ] *After the move back:* daily usage alarm — `GET /v1/organizations/{org}/usage` with a platform token,
+      alert at 50% / 80% of the monthly limit and on any day above ~16M reads
+- [x] `q` with only broad filters (`tier=community`, `source=imported`) filters a ranked window: up to
+      871,547 rows read → ~2K (D26 item 6)
+- [ ] `q` with a narrowing filter (`tier=verified`, `owner`, `min_score`, `spec_version`) or an explicit sort
+      still ranks every match: 68K–105K rows for `q=python` (BACKLOG.md)
+- [ ] *After the move back:* longer edge TTL for listings via `Vercel-CDN-Cache-Control`, with cache tags
+      purged on publish, delist and seed
 - [x] `q` within the curated tier (a tag, or `source=seeded`/`published`) starts from the curated index:
       up to 1,159,590 rows read → ~10K–20K (D26)
 - [x] skilldex-cli reads `total_relation`: "Found 1,000+ skills" for a capped count; the MCP search tool
