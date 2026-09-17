@@ -30,6 +30,19 @@ export function splitSql(sql: string): string[] {
   return merged;
 }
 
+/**
+ * True for trigger DDL — `CREATE TRIGGER` and `DROP TRIGGER`.
+ *
+ * A bulk load defers every trigger until the rows are in, then applies them. Since 005 replaces the
+ * skills triggers, "the triggers" is no longer a set of CREATE statements but a sequence — create
+ * (001), drop and create again (005) — and replaying only the CREATEs fails on the second
+ * `skills_au`. Deferring both kinds and running them in migration order reaches the same end state
+ * as applying every statement in order; tests/unit/query-costs.test.ts pins that.
+ */
+export function isTriggerDdl(stmt: string): boolean {
+  return /^(CREATE|DROP)\s+TRIGGER\b/i.test(stmt);
+}
+
 /** Every migration file, in lexical order — which is numeric order given the NNN_ prefix. */
 export function schemaFiles(): { version: string; path: string }[] {
   return readdirSync(SCHEMA_DIR)

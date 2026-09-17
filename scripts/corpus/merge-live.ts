@@ -129,7 +129,7 @@ console.log(`merged ${done.toLocaleString()} live rows: ${before.toLocaleString(
 
 // The FTS tables are external-content and the triggers are live by now, so they tracked these
 // writes. Verify rather than assume.
-for (const t of ["skills_fts", "skills_trgm"]) {
+for (const t of ["skills_fts"]) {
   await out.execute(`INSERT INTO ${t}(${t}) VALUES('integrity-check')`);
   console.log(`  ${t} integrity OK`);
 }

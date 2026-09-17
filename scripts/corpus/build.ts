@@ -23,7 +23,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { validateSkill } from "../../src/validator/index.js";
-import { allSchemaStatements } from "../lib/schema.js";
+import { allSchemaStatements, isTriggerDdl } from "../lib/schema.js";
 import { loadDelistings } from "../../src/db/delistings.js";
 
 const args = process.argv.slice(2);
@@ -50,7 +50,7 @@ for (const f of [OUT, `${OUT}-journal`, `${OUT}-wal`, `${OUT}-shm`]) if (existsS
 const statements = allSchemaStatements();
 const out = createClient({ url: `file:${OUT}` });
 for (const s of statements) {
-  if (/^CREATE TRIGGER/i.test(s)) continue;
+  if (isTriggerDdl(s)) continue;
   await out.execute(s);
 }
 console.log(`schema applied to ${OUT} (${statements.length} statements, triggers deferred)\n`);
@@ -170,10 +170,8 @@ for (const shard of shards) {
 console.log("\nbuilding FTS indexes...");
 t = Date.now();
 await out.execute("INSERT INTO skills_fts(skills_fts) VALUES('rebuild')");
-await out.execute("INSERT INTO skills_trgm(skills_trgm) VALUES('rebuild')");
-for (const s of statements) if (/^CREATE TRIGGER/i.test(s)) await out.execute(s);
+for (const s of statements) if (isTriggerDdl(s)) await out.execute(s);
 await out.execute("INSERT INTO skills_fts(skills_fts) VALUES('integrity-check')");
-await out.execute("INSERT INTO skills_trgm(skills_trgm) VALUES('integrity-check')");
 console.log(`  done in ${((Date.now() - t) / 1000).toFixed(0)}s`);
 
 const size = statSync(OUT).size;
