@@ -25,6 +25,10 @@ itself blocked, so the temporary database is built from the 2026-09-06 corpus fi
 production wrote between the cutover and the block. D26 gained a sixth fix (search with a broad
 filter).
 
+**Status, 2026-09-17 16:26 IST: serving from the temporary account (D30).** 1,615,322 skills; the
+three official skillsets are not yet republished. Verification in
+[REGISTRY_MIGRATION_FINDINGS.md](REGISTRY_MIGRATION_FINDINGS.md) §17.
+
 ---
 
 ## D1 — Move to Turso (SQLite), not a managed Postgres

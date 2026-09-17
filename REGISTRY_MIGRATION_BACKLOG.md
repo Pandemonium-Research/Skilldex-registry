@@ -448,11 +448,12 @@ Decisions D25–D29.
 - [ ] Move to a temporary Turso account until the 2026-10-01 reset (D30). `turso db export` is refused while
       the account is blocked, so the database comes from the 2026-09-06 file and loses the Sept 6–15 writes.
   - [x] New account's group `default` in `aws-us-east-1`
-  - [ ] Confirm no delisting, publish or `add-repo` was recorded between 2026-09-06 and 09-15
-  - [ ] `turso db create skilldex-registry-v2 --from-file build/temp-account/registry.db --group default --wait`
-  - [ ] Deploy the registry and Skilldex-web fixes, then swap `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`
-        together in Vercel and redeploy
-  - [ ] Republish the three official skillsets from Skilldex-skillset
+  - [x] Confirm no delisting, publish or `add-repo` was recorded between 2026-09-06 and 09-15 — *none known;
+        revisit at the move back*
+  - [x] `turso db create skilldex-registry-v2 --from-file build/temp-account/registry.db --group default --wait`
+  - [x] Deploy the registry and Skilldex-web fixes, then swap `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`
+        together in Vercel and redeploy — *serving from 2026-09-17 16:26 IST (FINDINGS §17)*
+  - [ ] Republish the three official skillsets from Skilldex-skillset — the publisher signs in again first
 - [ ] Move back on or after 2026-10-01 as a merge: export both databases, merge publishers, skillsets,
       published skills, delistings and install-count deltas locally, upload with `--from-file` (D30).
       Delete neither database until verified

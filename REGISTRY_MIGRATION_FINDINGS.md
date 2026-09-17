@@ -1226,3 +1226,49 @@ upload file itself was never opened for writing:
 
 Every count matches the cutover pre-flight (§13). The new account's group was created in
 `aws-us-east-1`, the original's region.
+
+### Live on the temporary account, 2026-09-17
+
+The database was created on the new account with `--from-file`, and `TURSO_DATABASE_URL` and
+`TURSO_AUTH_TOKEN` were replaced for Production. The merge of the fixes (PR #8, 16:01 IST) deployed
+before the variables were saved, so that deployment still carried the old account's keys. Vercel
+applies variables only to deployments created after the save:
+
+- `/v1/stats` answered 503 `DB_UNAVAILABLE`, `no-store` — the D26–D29 outage handling doing its job,
+  where the old code served cached zeros.
+- `/v1/skills?limit=1` also answered 503, which the error handler reserves for `BLOCKED`; a rejected
+  token would have been a 500. So the deployment was reaching the blocked account, not failing to
+  authenticate to the new one.
+
+A redeploy of that deployment picked up the new keys. **Serving again from 16:26 IST**, after ~2 days
+down. Checked against production, one request each:
+
+| Request | Status | Result |
+|---|---|---|
+| `/v1/stats` | 200 | 1,615,322 skills, 4,863 curated, 7 verified, 158,915 owners |
+| `/v1/skills?limit=3` | 200, 1.6s | `total=1615322 eq` |
+| `/v1/skills?q=pdf&limit=3` | 200, **17.1s** | `total=1000 gte` |
+| `/v1/skills?q=python&tier=community&limit=3` | 200, **22.4s** | `total=1000 gte` |
+| `/v1/skills?tags=terminal&limit=3` | 200, 1.5s | `total=942 eq` |
+| `/v1/skills?q=skill&tags=terminal&limit=3` | 200, 3.2s | `total=8 eq` |
+| `/v1/skills?tier=verified&limit=3` | 200, 0.8s | `total=7 eq` |
+| `/v1/skills/anthropics/pdf` | 200, 0.5s | resolves |
+| `/v1/skillsets?limit=3` | 200 | 0 — see below |
+| `/v1/auth/github` | 302 | to GitHub with the production callback |
+
+**The slow searches were a cold database, not query cost.** Repeated with a different `limit`, which is
+a different edge-cache key and so reaches the database again, `q=pdf` took 0.66s and
+`q=python&tier=community` 0.72s; `q=docker` 2.2s and `q=kubernetes` 2.0s on first touch, but
+`q=react&tier=community` still 13.4s. A database created from a file has read none of its pages, so
+the first query to touch a region of the FTS index pays for fetching it — the same 13s-cold,
+0.10s-warm pattern as the original cutover (§13). A cold search near the 30s function limit can 504
+until the index has been read through.
+
+**The website needed no redeploy.** It holds no Turso keys; `/registry` rendered 1,615,322 and 158,915
+within minutes, and `robots.txt` carries the new `Disallow: /registry?` rule from its own merge.
+
+**Skillsets must be republished by someone signing in again.** `publishers` holds only
+`skilldex-official`, the seeder's row. Whoever published the three official skillsets on 2026-09-09
+signed in after the file was made, so the registry has no row for them and their existing token
+answers 401 "Publisher account not found" until they sign in again, which recreates it. Skillset
+publishes are community tier whoever publishes, so the account used does not change the result.
