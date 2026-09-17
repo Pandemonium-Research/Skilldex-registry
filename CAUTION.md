@@ -120,7 +120,7 @@ That is the verified state of v2 as of 2026-09-07.
   experiments and one-off scripts run against a local copy of the corpus (D25). Several npm scripts
   load `.env` — `dev`, `seed`, `rescore`, `migrate`, `add-repo`, `refresh-stats`, `delist`,
   `parity:api` — and `.env` holds the production URL and token, so running one "locally" runs it
-  against production. The local recipe is in [ADMIN_CMDS.md](ADMIN_CMDS.md).
+  against production. The local recipe is in [LOCAL_REGISTRY.md](LOCAL_REGISTRY.md).
 - **The free plan blocks the whole account at any limit, not just the database that crossed it.**
   On 2026-09-15 a read-quota overrun made every statement on every database in the org fail with
   `BLOCKED`, and the registry went down (FINDINGS §16). Quotas reset on the 1st of the calendar

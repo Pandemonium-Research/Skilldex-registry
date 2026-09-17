@@ -428,7 +428,7 @@ why `q=pdf` (10k+ matches) is slower than `q=react hooks` (4.2k).
 The Turso account was blocked on 2026-09-15 for exceeding 500M rows read in a month (FINDINGS §16).
 Decisions D25–D29.
 
-- [x] Nothing but production traffic touches production; local-copy recipe in ADMIN_CMDS.md (D25)
+- [x] Nothing but production traffic touches production; local-copy recipe in LOCAL_REGISTRY.md (D25)
 - [x] Tag filter scoped to the curated tier: 3.2M rows read → 8,786–13,144 (D26)
 - [x] `tier=community` walks the sort index: 3,240,634 → 1,024 (D26)
 - [x] `spec_version` off 1.0 reads a partial index: 3,230,646 → 4–5 (D26, migration 005)

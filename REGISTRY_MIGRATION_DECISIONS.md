@@ -824,7 +824,7 @@ each request expensive; running development against production turned that into 
 the corpus, served by `sqld` on loopback, with the API pointed at it explicitly. npm scripts that load
 `.env` are for real administration only, because `.env` holds the production credentials. Experiments
 that fan out queries — E4a, E4b — point the CLI at a local registry through `SKILLDEX_REGISTRY_URL`.
-The recipe is in ADMIN_CMDS.md.
+The recipe is in LOCAL_REGISTRY.md.
 
 **Why `sqld`, not a `file:` URL.** The API uses `@libsql/client/web`, which speaks HTTP only. And `sqld`
 reports rows read and written per statement with the accounting Turso bills, so a change's cost is
