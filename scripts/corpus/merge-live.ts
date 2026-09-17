@@ -153,7 +153,8 @@ console.log(`carried ${tomb.rows.length} delisting rule(s) into the build`);
 
 // Load-bearing: build.ts writes the stats, then this script changes the row count. Without a
 // refresh here the uploaded database ships a headline count that is short by the merge delta.
-const stats = await refreshStats(out);
+// ownersMaxAgeMs: 0 — the merge has just changed the rows, so a stored owner count is stale.
+const stats = await refreshStats(out, { ownersMaxAgeMs: 0 });
 const tags = await refreshTagCounts(out);
 console.log(
   `\nstats: ${stats.skills_total.toLocaleString()} skills ` +

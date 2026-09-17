@@ -60,6 +60,17 @@ export async function readStats(client?: Client): Promise<RegistryStats> {
   return { values, updated_at };
 }
 
+/** How long a stored `owners_total` is trusted before refreshStats recounts it (D29). */
+export const OWNERS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export interface RefreshStatsOptions {
+  /**
+   * Recount owners only when the stored figure is older than this. `0` always recounts — for
+   * scripts building a local database file, where the scan costs nothing and counts have moved.
+   */
+  ownersMaxAgeMs?: number;
+}
+
 /**
  * Recompute every stat and write it.
  *
@@ -70,42 +81,69 @@ export async function readStats(client?: Client): Promise<RegistryStats> {
  * Deliberately one shared function rather than three call sites computing their own numbers —
  * if they disagree, the headline count flickers between runs.
  *
+ * Two of the six figures are no longer scans (D29):
+ *
+ * - `skills_imported` is `skills_total - skills_curated`. `source` is CHECK-constrained to
+ *   seeded/imported/published, so the difference is exact, and counting it directly read every
+ *   imported row — 1,615,322 rows per refresh.
+ * - `owners_total` is `count(DISTINCT owner)`, a full walk of the (owner, name) index. It is
+ *   recounted only when the stored value is older than OWNERS_MAX_AGE_MS: owners arrive slowly,
+ *   and a nightly recount was ~48M rows read a month for a headline figure.
+ *
+ * Together that took a refresh from 3,239,480 rows read to 8,836. A skipped owners count keeps its
+ * old `updated_at`, so /v1/stats — which reports the stalest key — says honestly that the figure
+ * may be up to a week old.
+ *
  * ⚠ Not a trigger. 001's bulk-import path loads rows with the FTS triggers dropped precisely
  * because 1.6M trigger firings dominate; adding a stats trigger would reintroduce that cost on
  * every write.
  */
-export async function refreshStats(client?: Client): Promise<Record<string, number>> {
+export async function refreshStats(
+  client?: Client,
+  options: RefreshStatsOptions = {}
+): Promise<Record<string, number>> {
   const db = client ?? getDb();
+  const maxAge = options.ownersMaxAgeMs ?? OWNERS_MAX_AGE_MS;
 
-  const [total, curated, imported, verified, skillsets, owners] = await db.batch(
+  const [total, curated, verified, skillsets, storedOwners] = await db.batch(
     [
       "SELECT count(*) AS n FROM skills",
       "SELECT count(*) AS n FROM skills WHERE source <> 'imported'",
-      "SELECT count(*) AS n FROM skills WHERE source = 'imported'",
       "SELECT count(*) AS n FROM skills WHERE trust_tier = 'verified'",
       "SELECT count(*) AS n FROM skillsets",
-      // Full index scan over the leading column of sqlite_autoindex_skills_2. Minutes at
-      // corpus scale — which is the entire reason this is precomputed.
-      "SELECT count(DISTINCT owner) AS n FROM skills",
+      "SELECT value, updated_at FROM registry_stats WHERE key = 'owners_total'",
     ],
     "read"
   );
 
   const n = (r: { rows: any[] }) => Number(r.rows[0].n);
+  const now = new Date();
+  const stored = storedOwners.rows[0];
+  const ownersFresh =
+    maxAge > 0 &&
+    stored !== undefined &&
+    now.getTime() - Date.parse(String(stored.updated_at)) < maxAge;
+
+  // Full index walk over the leading column of sqlite_autoindex_skills_2 when it runs — minutes at
+  // corpus scale, which is why it is both precomputed and rationed.
+  const owners = ownersFresh
+    ? Number(stored.value)
+    : n(await db.execute("SELECT count(DISTINCT owner) AS n FROM skills"));
+
   const computed: Record<StatKey, number> = {
     skills_total: n(total),
     skills_curated: n(curated),
-    skills_imported: n(imported),
+    skills_imported: n(total) - n(curated),
     skills_verified: n(verified),
     skillsets_total: n(skillsets),
-    owners_total: n(owners),
+    owners_total: owners,
   };
 
-  const now = new Date().toISOString();
+  const stamp = now.toISOString();
   await db.batch(
-    STAT_KEYS.map((key) => ({
+    STAT_KEYS.filter((key) => !(ownersFresh && key === "owners_total")).map((key) => ({
       sql: "INSERT OR REPLACE INTO registry_stats (key, value, updated_at) VALUES (?, ?, ?)",
-      args: [key, computed[key], now],
+      args: [key, computed[key], stamp],
     })),
     "write"
   );
