@@ -4,6 +4,7 @@ import app from "../../src/app.js";
 import { __setDbForTesting } from "../../src/db/client.js";
 import { allSchemaStatements, isTriggerDdl } from "../../scripts/lib/schema.js";
 import { searchSkills } from "../../src/db/skills.js";
+import { __setCountCapForTesting } from "../../src/db/pagination.js";
 import { refreshStats } from "../../src/db/stats.js";
 import { searchSkillsSchema } from "../../src/types/skill.js";
 
@@ -273,13 +274,112 @@ describe("relevance search (D26)", () => {
     }
   });
 
-  it("keeps ranking every match when another predicate or an explicit sort applies", async () => {
+  it("keeps ranking every match when a narrowing predicate or an explicit sort applies", async () => {
     await seedCorpus();
-    const filtered = await traced({ q: "deploy", tier: "community", limit: 10 });
-    expect(filtered.page.sql).toMatch(/bm25\(skills_fts\)/);
-    expect(filtered.page.sql).not.toMatch(/CROSS JOIN/);
-    const sorted = await traced({ q: "deploy", sort: "installs" });
-    expect(sorted.page.sql).toMatch(/bm25\(skills_fts\)/);
+    for (const over of [{ min_score: 60 }, { tier: "verified" }, { owner: "bulk-1" }, { spec_version: "1.0" }]) {
+      const filtered = await traced({ q: "deploy", limit: 10, ...over });
+      expect(filtered.page.sql, JSON.stringify(over)).toMatch(/bm25\(skills_fts\)/);
+      expect(filtered.page.sql, JSON.stringify(over)).not.toMatch(/CROSS JOIN/);
+    }
+    for (const over of [{}, { tier: "community" }]) {
+      const sorted = await traced({ q: "deploy", sort: "installs", ...over });
+      expect(sorted.page.sql, JSON.stringify(over)).toMatch(/bm25\(skills_fts\)/);
+    }
+  });
+});
+
+describe("search with a broad filter (D26)", () => {
+  const BROAD: [Record<string, string>, string, string[]][] = [
+    [{ tier: "community" }, "s.trust_tier = ?", ["community"]],
+    [{ source: "imported" }, "s.source = ?", ["imported"]],
+    [{ tier: "community", source: "imported" }, "s.source = ? AND s.trust_tier = ?", ["imported", "community"]],
+  ];
+
+  const rankAll = (fts: string, where: string, args: any[], limit: number, offset: number) =>
+    referenceIds(
+      `SELECT s.id FROM skills s JOIN (SELECT rowid AS seq, bm25(skills_fts) AS rank FROM skills_fts
+         WHERE skills_fts MATCH ?) m ON m.seq = s.seq
+       WHERE ${where} ORDER BY m.rank ASC, m.seq ASC LIMIT ? OFFSET ?`,
+      [fts, ...args, limit, offset]
+    );
+
+  const countAll = async (fts: string, where: string, args: any[]) =>
+    Number(
+      (
+        await db.execute({
+          sql: `SELECT count(*) AS n FROM skills s JOIN (SELECT rowid AS seq FROM skills_fts
+                  WHERE skills_fts MATCH ?) m ON m.seq = s.seq WHERE ${where}`,
+          args: [fts, ...args],
+        })
+      ).rows[0].n
+    );
+
+  it("filters a window ranked inside FTS5, probing skills by rowid", async () => {
+    await seedCorpus();
+    for (const [over] of BROAD) {
+      const { page } = await traced({ q: "deploy", ...over });
+      expect(page.sql, JSON.stringify(over)).toMatch(/ORDER BY rank LIMIT \?\) m/);
+      expect(page.sql, JSON.stringify(over)).not.toMatch(/bm25\(/);
+      const plan = (await planOf(page)).split("\n");
+      const window = plan.findIndex((l) => /SCAN skills_fts VIRTUAL TABLE/.test(l));
+      const probe = plan.findIndex((l) => /SEARCH s USING INTEGER PRIMARY KEY/.test(l));
+      expect(window, plan.join(" | ")).toBeGreaterThanOrEqual(0);
+      expect(probe, plan.join(" | ")).toBeGreaterThan(window);
+    }
+  });
+
+  it("returns the page and count that ranking every match returned", async () => {
+    await seedCorpus();
+    for (const [over, where, args] of BROAD) {
+      for (const [limit, offset] of [[5, 0], [5, 5], [1, 0], [20, 30], [50, 0], [10, 200]]) {
+        const { result } = await traced({ q: "deploy", ...over, limit, offset });
+        const label = `${JSON.stringify(over)} ${limit}/${offset}`;
+        expect(ids(result), label).toEqual(await rankAll('"deploy"', where, args, limit, offset));
+        expect(result.total, label).toBe(await countAll('"deploy"', where, args));
+      }
+    }
+  });
+
+  describe("when the window comes up short", () => {
+    // Verified rows that outrank every community row, so a small window holds nothing the filter keeps.
+    async function crowdedTop() {
+      for (let i = 0; i < 6; i++) {
+        await insert({ id: `v-${i}`, name: `v-${i}`, owner: "o", description: "zephyr zephyr zephyr", source: "seeded", tier: "verified" });
+      }
+      for (let i = 0; i < 5; i++) {
+        await insert({ id: `c-${i}`, name: `c-${i}`, owner: "o", description: `zephyr and ${"filler ".repeat(i + 3)}`, source: "seeded" });
+      }
+    }
+
+    it("reruns the full ranking when the count shows rows past the window", async () => {
+      await crowdedTop();
+      const { result } = await traced({ q: "zephyr", tier: "community", limit: 2 });
+      expect(captured).toHaveLength(3);
+      expect(asStmt(captured[2]).sql).toMatch(/bm25\(skills_fts\)/);
+      expect(ids(result)).toEqual(await rankAll('"zephyr"', "s.trust_tier = ?", ["community"], 2, 0));
+      expect(result.has_more).toBe(true);
+    });
+
+    it("reruns it too when a capped count cannot say whether more rows follow", async () => {
+      await crowdedTop();
+      const restore = __setCountCapForTesting(3);
+      try {
+        const { result } = await traced({ q: "zephyr", tier: "community", limit: 2 });
+        expect(result.total_relation).toBe("gte");
+        expect(captured).toHaveLength(3);
+        expect(ids(result)).toEqual(await rankAll('"zephyr"', "s.trust_tier = ?", ["community"], 2, 0));
+      } finally {
+        restore();
+      }
+    });
+
+    it("trusts a short page when the exact count says nothing follows it", async () => {
+      await crowdedTop();
+      const { result } = await traced({ q: "zephyr", tier: "community", limit: 10 });
+      expect(captured).toHaveLength(2);
+      expect(ids(result)).toEqual(await rankAll('"zephyr"', "s.trust_tier = ?", ["community"], 10, 0));
+      expect(result).toMatchObject({ total: 5, total_relation: "eq", has_more: false });
+    });
   });
 });
 
