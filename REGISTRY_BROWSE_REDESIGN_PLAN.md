@@ -288,7 +288,7 @@ Header carries the headline from `/v1/stats`: **`4,863 curated · 1,615,322 inde
 **With a query or filter** → result list plus load-more, and a scope toggle
 (`Curated · All skills`) that switches `scope`.
 
-Render `total_relation: "gte"` as **`10,000+`**, never a bare `10001`.
+Render `total_relation: "gte"` as **`10,000+`**, never a bare `10001`. *(Since D27 the cap is 1,000 — render `1,000+`.)*
 
 ### B4. Load-more — `src/app/api/registry/skills/route.ts` (new)
 

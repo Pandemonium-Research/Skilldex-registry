@@ -273,3 +273,34 @@ once, together, not twice.
 
 **How stale is it?** Unmeasured. Sampling stored scores against a re-score of the current upstream
 files would size it, and that measurement has never been run.
+
+---
+
+## Quota guardrails still open
+
+**Status:** open, recorded 2026-09-17 after the Turso read-quota block (REGISTRY_MIGRATION_FINDINGS.md
+§16, decisions D25–D29). The query shapes that burned the quota are fixed; these are the
+guardrails that would have caught it early, and the costs that remain.
+
+- **Usage alarm.** Nothing watched the quota: the limit was crossed around Sept 12–13 and nobody
+  knew until every endpoint returned 500 on the 15th. Turso's platform API reports month-to-date
+  usage per database (`GET /v1/organizations/{org}/usage`); a daily scheduled job alerting at 50%
+  and 80% of the month-to-date budget would have given two days' warning at least.
+- **Edge cache lifetime.** Listings and searches cache for 60s fresh plus 300s stale, so a query
+  repeated more than six minutes apart pays full price again, and every deploy empties the cache.
+  `Vercel-CDN-Cache-Control` could hold them for hours, but a publish could not then appear until
+  expiry. That needs cache tags (`Vercel-Cache-Tag`) purged on publish before it is safe.
+- **`q` with `tags`.** Still ranks every match before filtering: 68,602 rows read, down from
+  137,145, and no faster locally. Candidates: rank the ≤4,863 tagged rows directly, or top-k first
+  and filter after with a larger inner limit.
+- **Where 385M of the 500M reads went is still unknown.** About 115M is attributed (FINDINGS §16).
+  Turso's top-queries list (`turso db inspect --queries`) from the account that holds the database
+  would settle it; Vercel's request logs grouped by route for Sept 7–12 would too.
+- **The "storage transferred" chart.** It plateaued at ~45 GB for a 1.9 GB database and fell to
+  zero around Sept 13–14; Turso's docs do not define the metric. Not what blocked the account.
+- **Plan choice.** The Developer plan ($4.99/month) allows 2.5B reads and 25M writes and bills
+  overage instead of blocking. Against it: running on a second free account until the quota resets,
+  which needs a copy there and back, and a check that Turso's terms allow it.
+- **Typo-tolerant name search.** `skills_trgm` was the intended basis (D11) and is dropped in 005
+  because nothing queried it. Building the feature means rebuilding that index first — measure
+  its write cost against the quota before doing so.

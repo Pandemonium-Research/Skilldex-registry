@@ -1,5 +1,12 @@
 # Result Counting and Pagination at Scale
 
+> **Update 2026-09-17 — the cap is 1,000, not 10,000** (REGISTRY_MIGRATION_DECISIONS.md D27). The
+> design below is unchanged; only the constant moved. The count now stops at 1,001, `MAX_OFFSET` is
+> 1,000, and clients render `gte` as "1,000+". The reason is cost, not latency: Turso bills every row
+> a statement reads, and the capped count is the floor on what any filtered listing or search reads —
+> 10,001 rows just to say "10,000+". Numbers below that mention 10,000 or 10,001 describe the
+> original design and its measurements.
+
 Written 2026-09-06, during the Turso migration, after `count(*) OVER ()` turned the default
 `/v1/skills` listing into a >90s timeout at 1.6M rows.
 

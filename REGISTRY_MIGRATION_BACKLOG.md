@@ -272,7 +272,7 @@ D15–D17; measurements in FINDINGS §5–§8; background in
       the install command are independent; only the first is done. Gate the second on an
       end-to-end test against the deployed API with `skilldex-cli@1.2.0`
 - [ ] **Sitemap.** A per-skill sitemap would have to page the API, and every request past
-      offset 10,000 is now refused by the cap this same work introduced. It needs a bulk-export
+      offset 10,000 is now refused by the cap this same work introduced (1,000 since D27). It needs a bulk-export
       endpoint first. A static `sitemap.ts`/`robots.ts` is cheap and still absent
 - [ ] **`skills_trgm`** is built, integrity-checked, and still queried by nothing
 - [ ] `src/app/registry/skillsets/page.tsx` is a stale fork of the browse page. It inherits the
@@ -365,6 +365,12 @@ the corpus.
 
 ## Phase 9 — Free-text search latency
 
+**Update 2026-09-17 — the main cost is fixed (D26).** A search with no other filter now ranks inside
+FTS5 (`ORDER BY rank LIMIT` in the subquery), so only the page leaves the virtual table. Measured
+through the real API on the corpus: 48,093–879,555 rows read per cold search became 1,064, and
+1.0–2.9s became 0.02–0.35s locally, with identical pages (FINDINGS §16). A search combined with
+another filter still ranks every match — see Phase 10.
+
 **Now unblocked — cutover has happened.** Measured in production (FINDINGS §13):
 
 | `q=pdf` | Time |
@@ -395,13 +401,13 @@ FTS5 has no block-max WAND or MaxScore, so `ORDER BY bm25(...)` materialises and
 match before applying `LIMIT 20`. Cost scales with match count, not with result count — which is
 why `q=pdf` (10k+ matches) is slower than `q=react hooks` (4.2k).
 
-- [ ] **Confirm the diagnosis before optimising.** Time the FTS subquery alone against the same
+- [x] **Confirm the diagnosis before optimising.** *Done 2026-09-17: rank-dominated — ranking inside FTS5 removed it (D26).* Time the FTS subquery alone against the same
       query with `ORDER BY rowid` instead of bm25. If the gap is small, the cost is the rowid
       lookups into a 1.9 GB table and the fix is different
 - [ ] **Cache aggressively first.** These are GETs behind `s-maxage=60`; a popular query costs
       the full price once a minute. Check real hit rates before writing any SQL — this may be
       the whole answer
-- [ ] **Cap what gets ranked.** Score the first N matches by rowid rather than all of them.
+- [x] ~~**Cap what gets ranked.**~~ *Superseded 2026-09-17: FTS5 ranks top-k itself with no change to results (D26).* Score the first N matches by rowid rather than all of them.
       Changes results for broad queries, so it needs a judgement call on where N sits
 - [ ] **Consider a `rank` materialised at import time** — a static quality prior (score,
       install_count, description length) to order by when a query matches more than N rows.
@@ -411,11 +417,35 @@ why `q=pdf` (10k+ matches) is slower than `q=react hooks` (4.2k).
 
 ### Also deferred here
 
-- [ ] **`skills_trgm` is built, integrity-checked, and queried by nothing.** Substring and
+- [x] **`skills_trgm` is built, integrity-checked, and queried by nothing.** *Dropped in migration 005 (D28): 115 MB and a row on every write. Rebuild from `skills` if typo-tolerant search is built.* Substring and
       typo-tolerant matching exists in the database and is unreachable over HTTP. Wiring it up
       is a feature, not a fix, but it belongs with this work
 
 ---
+
+## Phase 10 — Quota hardening
+
+The Turso account was blocked on 2026-09-15 for exceeding 500M rows read in a month (FINDINGS §16).
+Decisions D25–D29.
+
+- [x] Nothing but production traffic touches production; local-copy recipe in ADMIN_CMDS.md (D25)
+- [x] Tag filter scoped to the curated tier: 3.2M rows read → 8,786–13,144 (D26)
+- [x] `tier=community` walks the sort index: 3,240,634 → 1,024 (D26)
+- [x] `spec_version` off 1.0 reads a partial index: 3,230,646 → 4–5 (D26, migration 005)
+- [x] Relevance search ranks inside FTS5: up to 879,555 → 1,064 (D26)
+- [x] Count cap and `MAX_OFFSET` 10,000 → 1,000 (D27)
+- [x] FTS triggers fire only on name/description; `skills_trgm` dropped (D28, migration 005)
+- [x] `refreshStats` derives imported, recounts owners weekly: 3,239,480 → 8,836 (D29)
+- [x] `rescore.ts` curated walk gets `skills_curated_name_idx`: 4,747,852 → 14,863 (migration 005)
+- [x] `/v1/stats` and `/v1/tags` answer a failing database with an uncached 503, not cached zeros;
+      `BLOCKED` on any route is a 503
+- [x] Skilldex-web `robots.txt` keeps crawlers off `/registry?…` filter URLs
+- [ ] Apply 005 by building locally and uploading (`--from-file`) — never on the hosted database
+- [ ] Daily usage alarm: `GET /v1/organizations/{org}/usage` with a platform token, alert at 50% / 80%
+      of the month-to-date budget
+- [ ] Longer edge TTL for listings via `Vercel-CDN-Cache-Control`, with cache tags purged on publish
+- [ ] `q` combined with `tags` still reads ~69K rows and ranks every match (137K before)
+- [ ] CLI prints "Found 1000 skills" for a capped result; it should read `total_relation` and say "1,000+"
 
 ## Not scheduled
 

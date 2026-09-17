@@ -1013,3 +1013,145 @@ inline-code fixtures all pointed at *missing* files, where both validators agree
 can show. The same shapes pointing at files that exist are exactly what separates them, and are now
 fixtures.
 
+---
+
+## 16. The read quota, exhausted — 2026-09-15
+
+**What happened.** On 2026-09-15 every database-backed endpoint began returning 500, and `/v1/stats`
+returned 200 with zeros, which the site rendered as "0 skills". Turso was refusing every statement:
+`BLOCKED: Operation was blocked: SQL read operations are forbidden (reads are blocked, do you need to
+upgrade your plan?)`. Reproduced directly with the database token and `SELECT 1`, so the deployment,
+the environment variables and the token were all fine.
+
+The `pandemoniumresearch` org is on Turso's Free plan: 500M rows read, 10M rows written and 5 GB of
+storage a month, and hitting any limit blocks the whole account. The dashboard showed 501.58M rows
+read — 498,737,963 on `skilldex-registry-v2`, 2,841,947 on `skilldex-registry` — 119K written, and
+8.45 MB of storage. Quotas reset on calendar-month boundaries, so the account comes back on
+2026-10-01.
+
+### Reads by day
+
+From the dashboard's per-day chart. Values are read off the bars, except Sept 9, where the tooltip
+gives the exact figure.
+
+| Day (Sept) | Rows read | Committed work that day |
+|---|---|---|
+| 6 | ~94.5M | migration and cutover; the corpus acceptance test on v2 before bounded counting (§11) |
+| 7 | ~74M | skillset coherence PRs; migration 004 (5s, empty table) |
+| 8 | ~19M | none, in any repository |
+| 9 | 117,524,060 | CLI search and `suggest` work, two npm releases, registry deploy fixes |
+| 10 | ~60M | E4 substrate probe; E6b pilots |
+| 11 | ~72M | E4c full run; E6b full run; skilldex-cli 1.5.0 |
+| 12 | ~56M | none, in any repository |
+| 13 | ~4M | none |
+| 14–15 | ~0 | none |
+
+Nothing was read before Sept 6. The limit was crossed around Sept 12–13 and the block landed on the
+15th; the registry kept serving in between.
+
+**There is no steady baseline.** Organic traffic or a crawler would put a floor under every day, but
+Sept 14 reads ~0 with the site up. The reads come in bursts on working days, plus two days (8 and 12)
+with nothing committed.
+
+### Attribution — about 115M of the 500M
+
+| Source | Estimate, from measured cost × volume |
+|---|---|
+| Sept 6 acceptance testing on v2. The listing then ran `count(*) OVER ()`, which reads **6,461,289 rows per request** and timed out at >90s, so every retry paid again; `source=seeded` scanned the table (§11) | plausibly most of that day |
+| E4 substrate probe, Sept 10, from its query list | ~5M |
+| E4c, Sept 11: 214 cold queries, plus retries and revisits | ~10–15M |
+| E6b | ~0 — each cell installs one skill by key, and no agent searched |
+| Nightly seeder | ~0 after Sept 6 — five runs in September, then disabled manually on the 6th |
+
+Ruled out on the development machine: direct database access (no `TURSO_*` variables or turso CLI
+outside this repository), skilldex MCP servers, hooks or installed skills that search the registry,
+and untracked scripts querying Turso. The remaining ~385M, mostly Sept 7–12, is unattributed.
+Settling it needs Turso's top-queries list from the account (`turso db inspect --queries`) or
+Vercel's request logs grouped by route.
+
+### What each request cost
+
+Turso bills rows read as rows *scanned*, not rows returned. `sqld` — the server Turso runs — reports
+the same counter per statement, so everything below was measured against a local copy of the corpus
+brought to the live schema: `build/registry.db` prepared with `prepare-corpus-db.ts`, then migrations
+004 and 005, 1,615,322 skills. Nothing touched production (D25).
+
+Before the fixes, per request:
+
+| Request | Rows read |
+|---|---|
+| `tier=community`, any sort | 3,240,634 |
+| `tags=<any>` sorted by installs or recent, or a tag nothing carries | 3,229,704 – 3,235,004 |
+| `spec_version=<anything but 1.0>` | 3,230,646 |
+| `q=skill` / `code` / `test` / `python` / `docker` | 879,555 / 625,851 / 454,209 / 112,755 / 48,093 |
+| `q=python&tier=community` | 1,394,221 (21.3s locally) |
+| `refreshStats`, run nightly by the seeder | 3,239,480 |
+| `rescore.ts`, curated read pass | 4,747,852 |
+| skill detail, bare-name lookup, default listing, `/v1/stats` | 1 – 24 |
+
+Each of the first three is about a fifth of a day's free-plan budget (16.7M). A tag listing is linked
+from every tagged skill page and from the tag chips on `/registry`, combined with whatever filters
+the URL already carries.
+
+Writes per operation, with the 001 triggers: an install (`install_count + 1`) wrote 6–7 rows, a score
+change 6, an insert 12, a description change 5, a delete 3. Every UPDATE rewrote both FTS5 tables,
+whichever column changed, and `skills_trgm` — 115 MB of the 1.9 GB file — was written on every one of
+those writes and read by nothing.
+
+### After D26–D29 — the real API, old code against new
+
+Both builds served on loopback against the same local database, with each request's cost taken from
+the change in `sqld`'s own counters. All 36 shapes compared returned identical pages and `has_more`
+from both builds.
+
+| Request | Old | New |
+|---|---|---|
+| `tier=community` | 3,240,634 | 1,026 |
+| `tier=community&sort=score` | 3,240,634 | 1,024 |
+| `tags=terminal` | 3,229,704 | 8,786 |
+| `tags=terminal&sort=score` | 2,096,072 | 13,144 |
+| `tags=terminal&sort=name` | 1,668,761 | 13,144 |
+| `tags=<nonexistent>` | 3,235,004 | 14,086 |
+| `spec_version=2.1` / `9.9` | 3,230,646 | 5 / 4 |
+| `spec_version=1.0` | 10,024 | 1,024 |
+| `q=skill` | 879,555 | 1,064 |
+| `q=code` | 625,851 | 1,064 |
+| `q=python` | 112,755 | 1,064 |
+| `q=react hooks` | 17,046 | 1,064 |
+| `q=python&tier=community` | 1,394,221 | 104,755 |
+| `q=python&tags=terminal` | 137,145 | 68,602 |
+| `q=python&sort=installs` | 181,298 | 103,755 |
+| `source=imported`, `min_score=90` | ~10,050 | ~1,050 |
+| `refreshStats` | 3,239,480 | 8,836 |
+| `rescore.ts` curated read pass | 4,747,852 | 14,863 |
+| **Sum over the 37 request shapes measured** | **33,648,001** | **356,286** |
+
+Writes after migration 005: an install 2–3 rows (was 6–7), a score change 2 (was 6), an insert 11 (was
+12), a description change 3 (was 5), a delete 2 (was 3).
+
+Applying 005 itself cost 3,235,804 rows read and 4,870 written, almost all of it the two
+`CREATE INDEX` scans — which is why it is applied to a file and uploaded (CAUTION.md §5).
+
+The count cap (D27) changes what some responses say. Totals that were exact below 10,000 —
+`source=seeded` 4,863, `owner=sickn33` 2,115, `q=react hooks` 4,261 — now read "1,000+".
+
+### Two more things the investigation turned up
+
+**A failure served as data.** `/v1/stats` caught every error and returned zeros under
+`s-maxage=300, stale-while-revalidate=3600`, so a blocked database looked like an empty registry and
+was cached as one. Now a failing database answers 503, uncached; only a missing table still reads as
+zeros. `BLOCKED` on any other route is a 503 rather than a 500.
+
+**Every deploy empties the edge cache.** Vercel's cache key includes the deployment URL, so after a
+deploy the first request for every distinct URL reaches the database. Sept 9 saw three registry
+production deploys and one site deploy.
+
+### Storage
+
+The v2 file is 1.89 GB: `skills` 987 MB, `skills_fts` 342 MB, the unique autoindexes 130 MB,
+`skills_trgm` 115 MB, `skills_content_key_key` 76 MB, and the other five indexes 151 MB. The
+dashboard's "storage transferred" chart held at ~45 GB from Sept 7 to 13 and fell to zero by the 15th.
+Turso's documentation does not define the metric, and it did not cause the block. Locally, `sqld`
+keeps a full-database snapshot (1.8 GB) beside its WAL log — consistent with large writes on the
+hosted database producing whole-file snapshots, but not proof of it.
+

@@ -260,6 +260,21 @@ Notes:
 - `DELAY_MS = 300` in the current seeder is a fixed 200 req/min pace. Replace with rate-limit
   header feedback (`x-ratelimit-remaining`, `x-ratelimit-reset`) and retry on secondary-limit
   responses.
+- **Turso's write quota binds before GitHub's rate limit does.** The free plan allows 10M rows written
+  a month, about 333K a day. Measured per operation on the corpus, after migration 005
+  (REGISTRY_MIGRATION_FINDINGS.md §16): inserting a skill writes 11 rows (the row plus FTS), changing
+  its name or description 3, an install or score change 2–3, `markScanned` 1, a `seen_source_urls`
+  upsert 1. A sweep that writes `repo_heads` for every repository it checks costs 220,607 rows a
+  pass — 6.6M a month nightly — before it has found a single change.
+  - **Write a `repo_heads` row only when something changed**: the head moved, the state changed, or
+    the failure count moved. A check that confirms nothing has changed writes nothing; derive or
+    batch `next_check_at` rather than stamping every row on every pass.
+  - **Give every run a write budget** that stops the run when exceeded, so a bug that turns every
+    repository into "changed" costs one run's budget, not a month's quota.
+  - §10's first-sweep hazard is also a write hazard: 1.6M spurious inserts is ~17.8M rows written.
+- **Reads are cheap if the shapes stay indexed.** `knownUrlsForRepo` is an index seek (~10K rows for
+  a large owner), and `refreshStats` at the end of a run reads ~9K rows since D29, with owners
+  recounted weekly. Any new query in the sync needs its plan checked against the corpus first.
 
 ---
 

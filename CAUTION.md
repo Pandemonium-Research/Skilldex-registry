@@ -116,6 +116,26 @@ That is the verified state of v2 as of 2026-09-07.
 
 ## 5. Other standing cautions
 
+- **Nothing runs against production Turso except production traffic.** Tests, fixes, measurements,
+  experiments and one-off scripts run against a local copy of the corpus (D25). Several npm scripts
+  load `.env` — `dev`, `seed`, `rescore`, `migrate`, `add-repo`, `refresh-stats`, `delist`,
+  `parity:api` — and `.env` holds the production URL and token, so running one "locally" runs it
+  against production. The local recipe is in [ADMIN_CMDS.md](ADMIN_CMDS.md).
+- **The free plan blocks the whole account at any limit, not just the database that crossed it.**
+  On 2026-09-15 a read-quota overrun made every statement on every database in the org fail with
+  `BLOCKED`, and the registry went down (FINDINGS §16). Quotas reset on the 1st of the calendar
+  month, and the block landed about two days after the limit was actually crossed.
+- **Migration 005 is applied to a local file and uploaded, never run on the hosted database.** Its
+  two `CREATE INDEX` statements read every row of `skills` — 3,235,804 rows read when applied
+  locally — and dropping `skills_trgm` frees 115 MB that only a `VACUUM` gives back. Build the file
+  locally (`prepare-corpus-db.ts`, then `migrate.ts --url file:…`, then `VACUUM`) and create the
+  database from it (D28).
+- **Copy a corpus-sized database as a file, never row by row.** `turso db create --from-file` bills
+  no row writes. Replaying rows would: each skill insert writes 11 rows once the FTS triggers
+  fire, so 1.6M of them is ~17.8M rows written — well past the free plan's 10M a month.
+- **Every Vercel deploy starts with an empty CDN cache.** The cache key includes the deployment URL,
+  so after each deploy the first request for every distinct URL reaches the database. Batch
+  deploys; do not redeploy repeatedly to test something.
 - **Never purge the `delistings` table.** It is the only thing preventing the next corpus
   build from re-importing content someone asked to have removed. See
   [OPT_OUT.md](OPT_OUT.md).
