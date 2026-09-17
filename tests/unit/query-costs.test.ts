@@ -277,8 +277,60 @@ describe("relevance search (D26)", () => {
     await seedCorpus();
     const filtered = await traced({ q: "deploy", tier: "community", limit: 10 });
     expect(filtered.page.sql).toMatch(/bm25\(skills_fts\)/);
+    expect(filtered.page.sql).not.toMatch(/CROSS JOIN/);
     const sorted = await traced({ q: "deploy", sort: "installs" });
     expect(sorted.page.sql).toMatch(/bm25\(skills_fts\)/);
+  });
+});
+
+describe("search within the curated tier (D26)", () => {
+  const legacy = (fts: string, where: string, args: any[], order: string, limit: number, offset: number) =>
+    referenceIds(
+      `SELECT s.id FROM skills s JOIN (SELECT rowid AS seq, bm25(skills_fts) AS rank FROM skills_fts
+         WHERE skills_fts MATCH ?) m ON m.seq = s.seq
+       WHERE ${where} ORDER BY ${order} LIMIT ? OFFSET ?`,
+      [fts, ...args, limit, offset]
+    );
+
+  it("walks the curated partial index and probes FTS5 per row", async () => {
+    await seedCorpus();
+    for (const over of [{ q: "deploy", tags: "terminal" }, { q: "deploy", source: "seeded" }, { q: "deploy", tags: "git", sort: "installs" }]) {
+      const { page, count } = await traced(over);
+      expect(page.sql, JSON.stringify(over)).toMatch(/CROSS JOIN skills_fts/);
+      for (const [which, stmt] of [["page", page], ["count", count!]] as const) {
+        // The curated index must be the outer loop, with FTS5 probed inside it — not the reverse.
+        const plan = (await planOf(stmt)).split("\n");
+        const outer = plan.findIndex((l) => /SCAN s USING (COVERING )?INDEX skills_curated_/.test(l));
+        const probe = plan.findIndex((l) => /skills_fts VIRTUAL TABLE/.test(l));
+        expect(outer, `${which} ${JSON.stringify(over)}: ${plan.join(" | ")}`).toBeGreaterThanOrEqual(0);
+        expect(probe, `${which} ${JSON.stringify(over)}: ${plan.join(" | ")}`).toBeGreaterThan(outer);
+      }
+    }
+  });
+
+  it("returns the page and count that ranking every match returned", async () => {
+    await seedCorpus();
+    const tagged = "s.source <> 'imported' AND EXISTS (SELECT 1 FROM json_each(s.tags) WHERE value IN (?))";
+    for (const [limit, offset] of [[5, 0], [5, 5], [50, 0]]) {
+      const byRank = await traced({ q: "deploy", tags: "terminal", limit, offset });
+      expect(ids(byRank.result), `relevance ${limit}/${offset}`).toEqual(
+        await legacy('"deploy"', tagged, ["terminal"], "m.rank ASC, m.seq ASC", limit, offset)
+      );
+      const byInstalls = await traced({ q: "deploy", tags: "terminal", sort: "installs", limit, offset });
+      expect(ids(byInstalls.result), `installs ${limit}/${offset}`).toEqual(
+        await legacy('"deploy"', tagged, ["terminal"], "s.install_count DESC, s.seq ASC", limit, offset)
+      );
+      const seeded = await traced({ q: "deploy", source: "seeded", limit, offset });
+      expect(ids(seeded.result), `source=seeded ${limit}/${offset}`).toEqual(
+        await legacy('"deploy"', "s.source <> 'imported' AND s.source = ?", ["seeded"], "m.rank ASC, m.seq ASC", limit, offset)
+      );
+    }
+    const total = await db.execute({
+      sql: `SELECT count(*) AS n FROM skills s JOIN (SELECT rowid AS seq FROM skills_fts WHERE skills_fts MATCH ?) m
+            ON m.seq = s.seq WHERE ${tagged}`,
+      args: ['"deploy"', "terminal"],
+    });
+    expect((await traced({ q: "deploy", tags: "terminal" })).result.total).toBe(Number(total.rows[0].n));
   });
 });
 

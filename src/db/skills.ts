@@ -232,9 +232,24 @@ export async function searchSkills(params: SearchSkillsQuery): Promise<SearchSki
   // ⚠ Never add a rowid tiebreak inside the subquery: it takes FTS5 off that path (589,744 rows for
   // `skill`). FTS5 already yields rank ties in rowid order; the outer ORDER BY re-sorts only the
   // page, so its seq tiebreak costs nothing.
-  //
-  // Any other predicate needs every match ranked before it filters, so those keep fromPage.
   const rankInsideFts = Boolean(fts) && where.length === 0 && sort === "relevance";
+
+  // A search confined to the curated tier — by a tag, or by source=seeded/published — starts from
+  // the curated rows and asks FTS5 about each one, instead of starting from every match (D26).
+  //
+  // FTS-first, a broad term joins every match to `skills` before the curated filter discards almost
+  // all of them: `q=skill&tags=terminal` read 1,159,588 rows. CROSS JOIN pins the order — SQLite
+  // otherwise prefers the virtual table outermost — so the curated partial index is walked and
+  // FTS5 is probed by rowid for each row, which it seeks to directly in the doclist. The cost is
+  // bounded by the size of the curated tier (~14K rows at 4,863 curated skills) whatever the query
+  // matches; identical pages and counts in all 13 shapes compared on the corpus. A term rare enough
+  // to match a few hundred rows costs more this way than FTS-first, but only up to that bound.
+  const curatedFts = Boolean(fts) && curatedOnly;
+
+  // Any other predicate needs every match ranked before it filters, so those keep fromPage.
+  const predicate = where.join(" AND ");
+  const curatedFrom = `skills s CROSS JOIN skills_fts ON skills_fts.rowid = s.seq
+          WHERE skills_fts MATCH ? AND ${predicate}`;
 
   // limit + 1 so has_more is exact without a second query. Sliced immediately by takePage, so
   // no caller can observe the extra row.
@@ -245,12 +260,20 @@ export async function searchSkills(params: SearchSkillsQuery): Promise<SearchSki
               ORDER BY m.rank ASC, m.seq ASC`,
         args: [fts as string, params.limit + 1, params.offset],
       }
-    : {
-        sql: `SELECT s.* FROM ${fromPage} ${whereSql}
+    : curatedFts
+      ? {
+          // bm25() evaluated per surviving row: the same scores the subquery form computes.
+          sql: `SELECT s.* FROM ${curatedFrom}
+          ORDER BY ${sort === "relevance" ? "bm25(skills_fts) ASC, s.seq ASC" : orderSql}
+          LIMIT ? OFFSET ?`,
+          args: [fts as string, ...whereArgs, params.limit + 1, params.offset],
+        }
+      : {
+          sql: `SELECT s.* FROM ${fromPage} ${whereSql}
           ORDER BY ${orderSql}
           LIMIT ? OFFSET ?`,
-        args: [...ftsArgs, ...whereArgs, params.limit + 1, params.offset],
-      };
+          args: [...ftsArgs, ...whereArgs, params.limit + 1, params.offset],
+        };
 
   // Derived from the predicate that was actually built, not by re-reading params. Testing
   // `params.tier || params.q || ...` drifts the first time someone adds a filter.
@@ -293,10 +316,15 @@ export async function searchSkills(params: SearchSkillsQuery): Promise<SearchSki
         sql: boundedCountSql("skills_fts", "WHERE skills_fts MATCH ?"),
         args: [fts as string, countLimitArg()],
       }
-    : {
-        sql: boundedCountSql(fromCount, whereSql),
-        args: [...ftsArgs, ...whereArgs, countLimitArg()],
-      };
+    : curatedFts
+      ? {
+          sql: `SELECT count(*) AS n FROM (SELECT 1 FROM ${curatedFrom} LIMIT ?)`,
+          args: [fts as string, ...whereArgs, countLimitArg()],
+        }
+      : {
+          sql: boundedCountSql(fromCount, whereSql),
+          args: [...ftsArgs, ...whereArgs, countLimitArg()],
+        };
 
   const [pageRes, countRes] = await db.batch([pageStmt, countStmt], "read");
 
