@@ -237,6 +237,17 @@ roughly 50 MB at 1.61M rows.
 **Why not just drop it.** Losing fuzzy name matching silently would be a user-visible
 regression in the thing the registry exists to do.
 
+> **Superseded 2026-09-17 by D28 — `skills_trgm` is dropped in migration 005.** The regression this
+> guarded against could not happen, because fuzzy name matching was never served on either stack. On
+> Supabase, `skills_name_trgm_idx` (`gin_trgm_ops`) existed in the schema but no query used it: search
+> was `textSearch("name, description", q)`, which is full-text, and no commit in `src/` or `api/` ever
+> used `ilike`, `similarity()` or a trigram operator. On Turso, no commit ever queried `skills_trgm`;
+> it was only built, rebuilt and integrity-checked by scripts, and the migration's API parity check
+> compared full-text queries only. No client — CLI, site or MCP server — offers substring or
+> typo-tolerant search. What the table did cost was real: 115 MB, not the ~50 MB estimated above, and
+> a row on every insert, update and delete. Building typo-tolerant name search is a new feature that
+> starts by recreating this table (D28).
+
 ---
 
 ## D12 — Import from the Hugging Face mirror, cite the Zenodo DOI
@@ -869,9 +880,17 @@ request shapes on the full corpus.
    other predicate the subquery now orders by FTS5's own `rank` (bm25 with default weights, the same
    function) under the LIMIT, so only the page is joined: 1,064. Rejected: a rowid tiebreak inside the
    subquery, which takes FTS5 off that path (589,744); capping how many matches get ranked, which
-   changes results. A search combined with another filter still ranks every match (104,755 for
-   `q=python&tier=community`, 68,602 with a tag); recorded open in BACKLOG.md.
-5. **How it stays fixed.** The tests assert query plans, not timings. With no `sqlite_stat1` — neither
+   changes results.
+5. **Search within the curated tier.** A search with a tag, or with `source=seeded`/`published`,
+   started from every FTS5 match and joined each to `skills` before the curated filter threw
+   nearly all of them away: `q=skill&tags=terminal` read 1,159,590 rows. It now starts from the
+   curated partial index, with `CROSS JOIN` pinning the order, and probes FTS5 by rowid for each row
+   — 14,094, identical pages and totals across 22 shapes. Its cost is bounded by the size of the
+   curated tier (~4,863 rows) rather than by how much the term matches, so a term that matches
+   nothing now reads ~12K rows instead of a handful: accepted, as a fixed ceiling beats a cost that
+   grows with the term. A search combined with any filter outside the curated tier still ranks every
+   match (104,755 for `q=python&tier=community`).
+6. **How it stays fixed.** The tests assert query plans, not timings. With no `sqlite_stat1` — neither
    the test database nor production has one — SQLite plans against the same default size estimates
    whatever a table holds, so a fixture gets production's access path.
 
@@ -891,7 +910,8 @@ relevance search read ~10,062 rows at a 10,000 cap and 1,064 at 1,000.
 `MAX_OFFSET` must equal the cap (`src/db/pagination.ts`), so no listing or search pages past 1,000
 either. What changes for clients: a total above 1,000 reads `"total": 1000, "total_relation": "gte"`,
 rendered "1,000+"; `offset` above 1,000 is a 400. Skilldex-web takes `max_offset` from the response.
-The CLI prints the bare number for now — open in REGISTRY_MIGRATION_BACKLOG.md Phase 10.
+skilldex-cli now reads `total_relation` and prints "Found 1,000+ skills", and its MCP search tool
+passes the relation through (not yet released).
 
 **What would reverse it.** A plan where 10K rows per request is noise, or a real need for deep paging —
 which is better met by cursors or an export than by a larger offset.
@@ -907,7 +927,9 @@ FTS5 tables: 6–7 rows written for a one-column change. It is now `AFTER UPDATE
 the two columns FTS indexes, and an install writes 2–3.
 
 `skills_trgm` was built for substring and typo-tolerant name matching (D11), and nothing ever queried
-it (Phase 9 already recorded it as unreachable). It held 115 MB and added a row to every insert,
+it (Phase 9 already recorded it as unreachable). D11's reason for keeping it — that dropping it would
+silently lose fuzzy matching — does not hold: that matching was never served, on Supabase or on Turso
+(see the note on D11). It held 115 MB and added a row to every insert,
 update and delete, so it is dropped. Rebuilding it from `skills` is possible if that feature is built;
 measure its write cost first.
 

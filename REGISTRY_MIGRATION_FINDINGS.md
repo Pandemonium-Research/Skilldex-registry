@@ -1119,18 +1119,28 @@ from both builds.
 | `q=python` | 112,755 | 1,064 |
 | `q=react hooks` | 17,046 | 1,064 |
 | `q=python&tier=community` | 1,394,221 | 104,755 |
-| `q=python&tags=terminal` | 137,145 | 68,602 |
+| `q=python&tags=terminal` | 137,145 | 14,145 |
+| `q=skill&tags=terminal` | 1,159,590 | 14,094 |
+| `q=skill&source=seeded` | 1,159,856 | 19,874 |
 | `q=python&sort=installs` | 181,298 | 103,755 |
 | `source=imported`, `min_score=90` | ~10,050 | ~1,050 |
 | `refreshStats` | 3,239,480 | 8,836 |
 | `rescore.ts` curated read pass | 4,747,852 | 14,863 |
-| **Sum over the 37 request shapes measured** | **33,648,001** | **356,286** |
+| **Sum over the 37 request shapes measured** | **33,648,001** | **301,829** |
 
 Writes after migration 005: an install 2–3 rows (was 6–7), a score change 2 (was 6), an insert 11 (was
 12), a description change 3 (was 5), a delete 2 (was 3).
 
 Applying 005 itself cost 3,235,804 rows read and 4,870 written, almost all of it the two
 `CREATE INDEX` scans — which is why it is applied to a file and uploaded (CAUTION.md §5).
+
+A search confined to the curated tier — `q` with a tag, or with `source=seeded`/`published` — at first
+read 68,602 rows here, and a broad term far more: `q=skill&tags=terminal` read 1,159,590, because the
+query started from every FTS5 match and discarded almost all of them. It now starts from the curated
+partial index and probes FTS5 by rowid for each row (the rows above). 22 shapes returned identical
+pages, `has_more` and totals before and after. The cost is bounded by the curated tier rather than by
+how much the term matches, which cuts both ways: a term matching nothing, with a tag, went from 4
+rows read to 12,203.
 
 The count cap (D27) changes what some responses say. Totals that were exact below 10,000 —
 `source=seeded` 4,863, `owner=sickn33` 2,115, `q=react hooks` 4,261 — now read "1,000+".

@@ -290,9 +290,9 @@ guardrails that would have caught it early, and the costs that remain.
   repeated more than six minutes apart pays full price again, and every deploy empties the cache.
   `Vercel-CDN-Cache-Control` could hold them for hours, but a publish could not then appear until
   expiry. That needs cache tags (`Vercel-Cache-Tag`) purged on publish before it is safe.
-- **`q` with `tags`.** Still ranks every match before filtering: 68,602 rows read, down from
-  137,145, and no faster locally. Candidates: rank the ≤4,863 tagged rows directly, or top-k first
-  and filter after with a larger inner limit.
+- ~~**`q` with `tags`.**~~ Fixed 2026-09-17 (D26): a search within the curated tier starts from the
+  curated partial index and probes FTS5 per row — ~14K rows, from up to 1,159,590. Still open: `q`
+  with `tier=community` ranks every match first (104,755 rows for `q=python`).
 - **Where 385M of the 500M reads went is still unknown.** About 115M is attributed (FINDINGS §16).
   Turso's top-queries list (`turso db inspect --queries`) from the account that holds the database
   would settle it; Vercel's request logs grouped by route for Sept 7–12 would too.

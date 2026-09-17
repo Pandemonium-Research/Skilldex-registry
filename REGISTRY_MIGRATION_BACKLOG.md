@@ -368,8 +368,9 @@ the corpus.
 **Update 2026-09-17 — the main cost is fixed (D26).** A search with no other filter now ranks inside
 FTS5 (`ORDER BY rank LIMIT` in the subquery), so only the page leaves the virtual table. Measured
 through the real API on the corpus: 48,093–879,555 rows read per cold search became 1,064, and
-1.0–2.9s became 0.02–0.35s locally, with identical pages (FINDINGS §16). A search combined with
-another filter still ranks every match — see Phase 10.
+1.0–2.9s became 0.02–0.35s locally, with identical pages (FINDINGS §16). A search within the curated
+tier now starts from the curated index (~14K rows); one combined with any other filter still ranks
+every match (BACKLOG.md).
 
 **Now unblocked — cutover has happened.** Measured in production (FINDINGS §13):
 
@@ -444,8 +445,10 @@ Decisions D25–D29.
 - [ ] Daily usage alarm: `GET /v1/organizations/{org}/usage` with a platform token, alert at 50% / 80%
       of the month-to-date budget
 - [ ] Longer edge TTL for listings via `Vercel-CDN-Cache-Control`, with cache tags purged on publish
-- [ ] `q` combined with `tags` still reads ~69K rows and ranks every match (137K before)
-- [ ] CLI prints "Found 1000 skills" for a capped result; it should read `total_relation` and say "1,000+"
+- [x] `q` within the curated tier (a tag, or `source=seeded`/`published`) starts from the curated index:
+      up to 1,159,590 rows read → ~10K–20K (D26)
+- [x] skilldex-cli reads `total_relation`: "Found 1,000+ skills" for a capped count; the MCP search tool
+      passes the relation through (skilldex-cli, not yet released)
 
 ## Not scheduled
 
